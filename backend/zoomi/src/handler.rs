@@ -32,13 +32,13 @@ pub struct MediaIncomingRequest {
     user_id: usize,
     topic: Option<String>,
     timestamp: u64,
-    array: [u8; 1024]
+    array: Vec<u8>
 }
 
 #[derive(Serialize, Debug)]
 pub struct MediaOutgoingRequest {
     timestamp: u64,
-    array: [u8; 1024]
+    array: Vec<u8>
 }
 
 pub async fn publish_handler(body: Event, clients: Clients) -> Result<impl Reply> {
@@ -123,29 +123,28 @@ pub async fn remove_topic(body: TopicActionRequest, clients: Clients) -> Result<
 }
 
 pub async fn broadcast(body: MediaIncomingRequest, clients: Clients) -> Result<impl Reply> {
+    println!("publish_handler: {:?}", body.topic);
 
-    // Assuming you have this already:
-    let request = MediaOutgoingRequest {
+    let response = MediaOutgoingRequest {
         timestamp: body.timestamp,
-        array: body.array,
+        array: body.array.clone(),
     };
-
-    let binary_data = bincode::serde::encode_to_vec(&request);
 
     clients
         .read()
         .await
         .iter()
-        .filter(|(_, client)| match body.user_id {
-            Some(v) => client.user_id == v, // if body.user_id is not None, filter by user_id
+        .filter(|(_, client)| client.user_id == body.user_id)
+        .filter(|(_, client)| match &body.topic {
+            Some(t) => client.topics.contains(t) , // if body.user_id is not None, filter by user_id
             None => true, // if body.user_id is None, do not filter by user_id and send to ALL clients
         })
-        .filter(|(_, client)| client.topics.contains(&body.topic))
         .for_each(|(_, client)| {
             if let Some(sender) = &client.sender { // check if sender is not None and bind the value of client.sender to sender
-                let _ = sender.send(Ok(Message::Binary(
-                    binary_data
-                )));
+
+                if let Ok(json_payload) = serde_json::to_string(&response) {
+                    let _ = sender.send(Ok(Message::text(json_payload)));
+                }
             }
         });
 

@@ -18,9 +18,6 @@ export default function AudioStreamer() {
       const audioContext = new AudioContext();
       audioContextRef.current = audioContext;
 
-      // Load the worklet module (relative to public directory)
-      await audioContext.audioWorklet.addModule("/recorder-processor.js");
-
       const workletNode = new AudioWorkletNode(audioContext, "recorder-processor");
       workletNodeRef.current = workletNode;
 

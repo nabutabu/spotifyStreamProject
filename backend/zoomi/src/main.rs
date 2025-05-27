@@ -62,13 +62,20 @@ async fn main() {
         .and(warp::body::json::<TopicActionRequest>())
         .and(warp::any().map(move || clients_for_remove.clone()))
         .and_then(remove_topic);
-        
+
+    let broadcast_route = warp::post()
+        .and(warp::path("broadcast"))
+        .and(warp::body::json())
+        .and(with_clients(clients.clone()))
+        .and_then(handler::broadcast);
+
     let routes = health_route
         .or(register_routes)
         .or(ws_route)
         .or(publish)
         .or(add_topic_route)
         .or(remove_topic_route)
+        .or(broadcast_route)
         .with(warp::cors().allow_any_origin());
 
 
