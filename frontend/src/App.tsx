@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 
 const API_BASE_URL = 'http://localhost:8000';
+const AUDIO_CHUNK_SIZE = 500; // Size of each audio chunk in milliseconds
 
 export default function WebSocketTopicApp() {
   const [topic, setTopic] = useState('');
@@ -12,6 +13,7 @@ export default function WebSocketTopicApp() {
   const [error, setError] = useState('');
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [serverHealth, setServerHealth] = useState(false);
+  const [userId, setUserId] = useState(1); // Now using state for user ID
   
   // Audio capture states
   const [isCapturing, setIsCapturing] = useState(false);
@@ -25,7 +27,6 @@ export default function WebSocketTopicApp() {
   const [currentlyPlayingIndex, setCurrentlyPlayingIndex] = useState(-1);
   
   const wsRef = useRef(null);
-  let userId = 1;
   const mediaRecorderRef = useRef(null);
   const streamRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -58,7 +59,8 @@ export default function WebSocketTopicApp() {
         }),
       });
 
-      userId = userId + 1;
+      // Increment user ID after successful registration
+      setUserId(prevId => prevId + 1);
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
@@ -369,7 +371,7 @@ export default function WebSocketTopicApp() {
             }
           }, 100);
         }
-      }, 2000);
+      }, AUDIO_CHUNK_SIZE); // Send audio data every 500ms
 
       streamRef.current.intervalId = interval;
 

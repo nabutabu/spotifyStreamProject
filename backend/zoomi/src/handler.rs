@@ -37,6 +37,7 @@ pub struct MediaIncomingRequest {
 
 #[derive(Serialize, Debug)]
 pub struct MediaOutgoingRequest {
+    user_id: usize,
     timestamp: u64,
     array: Vec<u8>
 }
@@ -126,6 +127,7 @@ pub async fn broadcast(body: MediaIncomingRequest, clients: Clients) -> Result<i
     println!("publish_handler: {:?}", body.topic);
 
     let response = MediaOutgoingRequest {
+        user_id: body.user_id, 
         timestamp: body.timestamp,
         array: body.array.clone(),
     };
@@ -134,7 +136,7 @@ pub async fn broadcast(body: MediaIncomingRequest, clients: Clients) -> Result<i
         .read()
         .await
         .iter()
-        .filter(|(_, client)| client.user_id == body.user_id)
+        .filter(|(_, client)| client.user_id != body.user_id)
         .filter(|(_, client)| match &body.topic {
             Some(t) => client.topics.contains(t) , // if body.user_id is not None, filter by user_id
             None => true, // if body.user_id is None, do not filter by user_id and send to ALL clients
