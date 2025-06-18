@@ -10,6 +10,6 @@ WORKDIR /usr/local/bin
 
 COPY --from=build /usr/src/zoomi/target/debug/zoomi .
 
-EXPOSE 8080
+EXPOSE 8000
 
 CMD ["./zoomi"]

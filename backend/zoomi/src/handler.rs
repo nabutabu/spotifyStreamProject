@@ -2,6 +2,9 @@ use crate::{ws, Client, Clients, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp::{http::StatusCode, reply::json, ws::Message, Reply};
+use base64::{engine::general_purpose, Engine as _};
+use warp::http::{Response, Uri, header};
+
 #[derive(Deserialize, Debug)]
 pub struct RegisterRequest {
     user_id: usize,
@@ -41,6 +44,87 @@ pub struct MediaOutgoingRequest {
     timestamp: u64,
     array: Vec<u8>
 }
+
+#[derive(Debug, Deserialize)]
+pub struct AuthCodeQuery {
+    code: String,
+    state: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    token_type: String,
+    expires_in: u64,
+    refresh_token: String,
+    scope: String,
+}
+
+#[derive(Debug)]
+enum MyCustomError {
+    HttpError,
+    BadRequest,
+    SpotifyTokenError,
+    // ...
+}
+impl warp::reject::Reject for MyCustomError {}
+
+pub async fn callback(query: AuthCodeQuery) -> Result<impl Reply> {
+    println!("Received code: {}", query.code);
+
+    authenticate(&query.code, "https://127.0.0.1:443/callback")
+        .await?;
+
+    println!("Authentication successful, redirecting...");
+
+    Ok(StatusCode::OK)
+}
+
+async fn authenticate(code: &str, redirect_uri: &str) -> Result<impl warp::Reply> {
+    let client_id = std::env::var("33761d48be7b443485a146820010cfc7").unwrap();
+    let client_secret = std::env::var("bd8f159bf0a1435ab4aa21ad09a52cdd").unwrap();
+    let credentials = general_purpose::STANDARD.encode(format!("{}:{}", client_id, client_secret));
+
+    let http_client = reqwest::Client::new();
+
+    let res = http_client
+        .post("https://accounts.spotify.com/api/token")
+        .header("Authorization", format!("Basic {}", credentials))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+        ])
+        .send()
+        .await
+        .map_err(|_| warp::reject::custom(MyCustomError::HttpError))?;
+
+    let token_data = res.json::<TokenResponse>().await
+        .map_err(|_| warp::reject::custom(MyCustomError::HttpError))?;
+
+    // Build redirect response with Set-Cookie header
+    let redirect_uri = Uri::builder()
+        .scheme("https")
+        .path_and_query("/room")
+        .build()
+        .unwrap();
+
+    let redirect_response = Response::builder()
+        .status(303) // See Other
+        .header(header::LOCATION, redirect_uri.to_string())
+        .header(
+            header::SET_COOKIE,
+            format!(
+                "access_token={}; HttpOnly; Secure; SameSite=Strict; Path=/",
+                token_data.access_token
+            )
+        )
+        .body("")
+        .unwrap();
+
+    Ok(redirect_response)
+}
+
 
 pub async fn publish_handler(body: Event, clients: Clients) -> Result<impl Reply> {
     println!("publish_handler: {}", body.topic);

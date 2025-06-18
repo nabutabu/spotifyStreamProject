@@ -69,6 +69,11 @@ async fn main() {
         .and(with_clients(clients.clone()))
         .and_then(handler::broadcast);
 
+    let callback_route = warp::path("callback")
+        .and(warp::get())
+        .and(warp::query::<handler::AuthCodeQuery>())
+        .and_then(handler::callback);
+
     let routes = health_route
         .or(register_routes)
         .or(ws_route)
@@ -76,12 +81,12 @@ async fn main() {
         .or(add_topic_route)
         .or(remove_topic_route)
         .or(broadcast_route)
+        .or(callback_route)
         .with(warp::cors()
             .allow_any_origin()
             .allow_methods(vec!["GET", "POST", "OPTIONS"])
             .allow_headers(vec!["Content-Type"])
     );
-
 
     println!("Listening on 127.0.0.1:8000");
     warp::serve(routes).run(([127, 0, 0, 1], 8000)).await;
