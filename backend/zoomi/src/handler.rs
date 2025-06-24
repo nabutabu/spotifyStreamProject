@@ -61,31 +61,46 @@ struct TokenResponse {
 }
 
 #[derive(Debug)]
-enum MyCustomError {
-    HttpError,
-    BadRequest,
-    SpotifyTokenError,
-    // ...
-}
-impl warp::reject::Reject for MyCustomError {}
+struct HttpError;
+impl warp::reject::Reject for HttpError {}
+
 
 pub async fn callback(query: AuthCodeQuery) -> Result<impl Reply> {
     println!("Received code: {}", query.code);
 
-    authenticate(&query.code, "https://127.0.0.1:443/callback")
+    let token_data = 
+    authenticate(&query.code, "https://127.0.0.1/api/callback")
         .await?;
 
     println!("Authentication successful, redirecting...");
 
-    Ok(StatusCode::OK)
+    let redirect_uri = Uri::builder()
+        .path_and_query("/room")
+        .build()
+        .unwrap();
+
+    Ok(Response::builder()
+        .status(303)
+        .header(header::LOCATION, redirect_uri.to_string())
+        .header(
+            header::SET_COOKIE,
+            format!(
+                "access_token={}; HttpOnly; Secure; SameSite=Strict; Path=/",
+                token_data.access_token
+            )
+        )
+        .body("")
+        .unwrap())
 }
 
-async fn authenticate(code: &str, redirect_uri: &str) -> Result<impl warp::Reply> {
-    let client_id = std::env::var("33761d48be7b443485a146820010cfc7").unwrap();
-    let client_secret = std::env::var("bd8f159bf0a1435ab4aa21ad09a52cdd").unwrap();
+async fn authenticate(code: &str, redirect_uri: &str) -> Result<TokenResponse> {
+    let client_id = "33761d48be7b443485a146820010cfc7";
+    let client_secret = "bd8f159bf0a1435ab4aa21ad09a52cdd";
     let credentials = general_purpose::STANDARD.encode(format!("{}:{}", client_id, client_secret));
 
     let http_client = reqwest::Client::new();
+
+    println!("Sending POST request to Spotify API...");
 
     let res = http_client
         .post("https://accounts.spotify.com/api/token")
@@ -97,32 +112,12 @@ async fn authenticate(code: &str, redirect_uri: &str) -> Result<impl warp::Reply
         ])
         .send()
         .await
-        .map_err(|_| warp::reject::custom(MyCustomError::HttpError))?;
+        .map_err(|_| warp::reject::custom(HttpError))?;
 
     let token_data = res.json::<TokenResponse>().await
-        .map_err(|_| warp::reject::custom(MyCustomError::HttpError))?;
+    .map_err(|_| warp::reject::custom(HttpError))?;
 
-    // Build redirect response with Set-Cookie header
-    let redirect_uri = Uri::builder()
-        .scheme("https")
-        .path_and_query("/room")
-        .build()
-        .unwrap();
-
-    let redirect_response = Response::builder()
-        .status(303) // See Other
-        .header(header::LOCATION, redirect_uri.to_string())
-        .header(
-            header::SET_COOKIE,
-            format!(
-                "access_token={}; HttpOnly; Secure; SameSite=Strict; Path=/",
-                token_data.access_token
-            )
-        )
-        .body("")
-        .unwrap();
-
-    Ok(redirect_response)
+    Ok(token_data)
 }
 
 

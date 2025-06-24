@@ -89,7 +89,7 @@ async fn main() {
     );
 
     println!("Listening on 127.0.0.1:8000");
-    warp::serve(routes).run(([127, 0, 0, 1], 8000)).await;
+    warp::serve(routes).run(([0, 0, 0, 0], 8000)).await;
 }
 
 fn with_clients(clients: Clients) -> impl Filter<Extract = (Clients,), Error = Infallible> + Clone {

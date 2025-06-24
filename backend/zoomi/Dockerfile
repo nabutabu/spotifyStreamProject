@@ -5,10 +5,10 @@ COPY . .
 
 RUN make
 
-FROM debian:buster-slim
+FROM debian:bookworm-slim
 WORKDIR /usr/local/bin
 
-COPY --from=build /usr/src/zoomi/target/debug/zoomi .
+COPY --from=build /usr/src/zoomi/target/release/zoomi .
 
 EXPOSE 8000
 
