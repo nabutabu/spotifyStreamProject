@@ -10,6 +10,19 @@ export default function Home() {
   const [userId, setUserId] = useState(1);
   const navigate = useNavigate();
 
+  function getCookie(name: string): string | null {
+    const cookies = document.cookie.split(';');
+
+    for (const cookie of cookies) {
+      const [key, ...rest] = cookie.trim().split('=');
+      if (key === name) {
+        return decodeURIComponent(rest.join('='));
+      }
+    }
+
+    return null;
+  }
+
   const registerTopic = async () => {
     if (!topic.trim()) {
       setError('Please enter a topic name');
@@ -28,8 +41,17 @@ export default function Home() {
       const data = await response.json();
       const websocketUrl = data.url;
       // On success, navigate to the Room page with wsUrl
-      navigate(`/room/${encodeURIComponent(topic.trim())}`, { state: { userId, wsUrl: websocketUrl } });
-    } catch (err) {
+
+      const isSpotifyAuthenticated = getCookie('access_token');
+
+      if(!isSpotifyAuthenticated) {
+        navigate(`/SpotifyLogin`, { state: { userId, topic, wsUrl: websocketUrl }});
+      }
+      else {
+        navigate(`/room/${encodeURIComponent(topic.trim())}`, { state: { userId, wsUrl: websocketUrl } });
+      }
+    }
+    catch (err) {
       setError(`Failed to register topic: ${err.message}`);
     } finally {
       setIsLoading(false);

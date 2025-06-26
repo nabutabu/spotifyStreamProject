@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useLocation, useNavigate } from 'react-router-dom';
+import MusicPlayer from '../components/MusicPlayer';
 
 const API_BASE_URL = 'http://localhost:8000';
 const AUDIO_CHUNK_SIZE = 500;
@@ -657,6 +658,11 @@ export default function Room() {
               </button>
             </div>
           )}
+
+          {/* Music Player Section */}
+          {
+            <MusicPlayer/>
+          }
 
           {/* Connection Info */}
           <div className="mb-6 p-4 bg-gray-50 rounded-lg">

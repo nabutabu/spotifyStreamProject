@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp::{http::StatusCode, reply::json, ws::Message, Reply};
 use base64::{engine::general_purpose, Engine as _};
-use warp::http::{Response, Uri, header};
+use warp::http::{Response, Uri, HeaderValue, header};
+use cookie::Cookie;
+use serde_json::Value;
 
 #[derive(Deserialize, Debug)]
 pub struct RegisterRequest {
@@ -78,17 +80,29 @@ pub async fn callback(query: AuthCodeQuery) -> Result<impl Reply> {
         .path_and_query("/room")
         .build()
         .unwrap();
-
-    Ok(Response::builder()
+    
+    let mut response = Response::builder()
         .status(303)
-        .header(header::LOCATION, redirect_uri.to_string())
-        .header(
-            header::SET_COOKIE,
-            format!(
-                "access_token={}; HttpOnly; Secure; SameSite=Strict; Path=/",
-                token_data.access_token
-            )
-        )
+        .header(header::LOCATION, redirect_uri.to_string());
+
+    let headers = response
+        .headers_mut()
+        .expect("Failed to get headers from builder");
+    
+    headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&format!(
+            "access_token={}; HttpOnly; Secure; SameSite=Strict; Path=/",
+            token_data.access_token
+        )).unwrap(),
+    );
+
+    headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_static("isAuthenticated=true; Secure; SameSite=Strict; Path=/"),
+    );
+
+    Ok(response
         .body("")
         .unwrap())
 }
@@ -230,4 +244,99 @@ pub async fn broadcast(body: MediaIncomingRequest, clients: Clients) -> Result<i
         });
 
     Ok(StatusCode::OK)
+}
+
+
+/******************* SPOTIFY FUNCTIONS **********************/
+
+pub async fn current_song(headers: header::HeaderMap) -> Result<Box<dyn Reply>> {
+    let cookies = headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let access_token = cookies
+        .split(';')
+        .find_map(|s| {
+            let cookie = Cookie::parse(s.trim()).ok()?;
+            if cookie.name() == "access_token" {
+                Some(cookie.value().to_string())
+            } else {
+                None
+            }
+        });
+
+    let access_token = match access_token {
+        Some(token) => token,
+        None => {
+            let res = warp::reply::with_status("Unauthorized", StatusCode::UNAUTHORIZED);
+            return Ok(Box::new(res));
+        }
+    };
+
+    let http_client = reqwest::Client::new();
+
+    println!("Sending GET request to Spotify API...");
+
+    let spotify_res = http_client
+        .get("https://api.spotify.com/v1/me/player/currently-playing")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|_| warp::reject::custom(HttpError))?;
+
+    // TODO: Spotify will send "EMPTY_RESPONSE" when no music has been playing for a while, handle that case
+
+    let json_body: Value = spotify_res
+        .json()
+        .await
+        .map_err(|_| warp::reject::custom(HttpError))?;
+
+    Ok(Box::new(json(&json_body)))
+}
+
+pub async fn get_queue(headers: header::HeaderMap) -> Result<Box<dyn Reply>> {
+    let cookies = headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let access_token = cookies
+        .split(';')
+        .find_map(|s| {
+            let cookie = Cookie::parse(s.trim()).ok()?;
+            if cookie.name() == "access_token" {
+                Some(cookie.value().to_string())
+            } else {
+                None
+            }
+        });
+
+    let access_token = match access_token {
+        Some(token) => token,
+        None => {
+            let res = warp::reply::with_status("Unauthorized", StatusCode::UNAUTHORIZED);
+            return Ok(Box::new(res));
+        }
+    };
+
+    let http_client = reqwest::Client::new();
+
+    println!("Sending GET request to Spotify API...");
+
+    let spotify_res = http_client
+        .get("https://api.spotify.com/v1/me/player/queue")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|_| warp::reject::custom(HttpError))?;
+
+    // TODO: Spotify will send "EMPTY_RESPONSE" when no music has been playing for a while, handle that case
+
+    let json_body: Value = spotify_res
+        .json()
+        .await
+        .map_err(|_| warp::reject::custom(HttpError))?;
+
+    Ok(Box::new(json(&json_body)))
 }

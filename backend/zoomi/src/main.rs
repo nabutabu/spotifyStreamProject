@@ -73,6 +73,17 @@ async fn main() {
         .and(warp::get())
         .and(warp::query::<handler::AuthCodeQuery>())
         .and_then(handler::callback);
+    
+    // SPOTIFY ROUTES
+    let current_song_route = warp::path("current_song")
+        .and(warp::get())
+        .and(warp::header::headers_cloned())
+        .and_then(handler::current_song);
+    
+    let get_queue_route = warp::path("get_queue")
+        .and(warp::get())
+        .and(warp::header::headers_cloned())
+        .and_then(handler::get_queue);
 
     let routes = health_route
         .or(register_routes)
@@ -82,6 +93,8 @@ async fn main() {
         .or(remove_topic_route)
         .or(broadcast_route)
         .or(callback_route)
+        .or(current_song_route)
+        .or(get_queue_route)
         .with(warp::cors()
             .allow_any_origin()
             .allow_methods(vec!["GET", "POST", "OPTIONS"])

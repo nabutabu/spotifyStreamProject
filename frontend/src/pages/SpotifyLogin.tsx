@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useParams, useLocation, useNavigate } from 'react-router-dom';
 import { Music, Headphones, Play } from 'lucide-react';
 
 var client_id = '33761d48be7b443485a146820010cfc7';
@@ -9,6 +10,7 @@ export default function SpotifyLogin() {
     const [error, setError] = useState('');
     const [isAuthenticated, setIsAuthenticated] = useState(false);
     const [userInfo, setUserInfo] = useState(null);
+    const [topic] = useState(location.state?.topic || '');
 
     const loginToSpotify = useCallback(() => {
         setIsLoading(true);
