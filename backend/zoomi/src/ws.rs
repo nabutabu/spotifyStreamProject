@@ -12,8 +12,11 @@ pub struct TopicsRequest {
 }
 
 pub async fn client_connection(ws: WebSocket, id: String, clients: Clients, mut client: Client) {
+    println!("{} connecting", id);
     let (client_ws_sender, mut client_ws_rcv) = ws.split();
     let (client_sender, client_rcv) = mpsc::unbounded_channel();
+
+    println!("{} here", id);
 
     let client_rcv = UnboundedReceiverStream::new(client_rcv);
     tokio::task::spawn(client_rcv.forward(client_ws_sender).map(|result| {
@@ -21,6 +24,8 @@ pub async fn client_connection(ws: WebSocket, id: String, clients: Clients, mut 
             eprintln!("error sending websocket msg: {}", e);
         }
     }));
+
+    println!("made new Unboundedreceiverstream and added it to tokio task");
 
     client.sender = Some(client_sender);
     clients.write().await.insert(id.clone(), client);

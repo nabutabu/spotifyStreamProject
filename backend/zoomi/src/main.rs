@@ -11,17 +11,29 @@ mod ws;
 
 type Result<T> = std::result::Result<T, Rejection>; // declaring the type of a sent Result
 type Clients = Arc<RwLock<HashMap<String, Client>>>; // declaring the type of a Client Map
+type Rooms = Arc<RwLock<HashMap<String, Room>>>; // declaring the type of a Room Map
 
 #[derive(Debug, Clone)]
 pub struct Client {
-    pub user_id: usize,
+    pub user_id: String,
     pub topics: Vec<String>,
     pub sender: Option<mpsc::UnboundedSender<std::result::Result<Message, warp::Error>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Room {
+    pub id: String, // the room id also serves as the ws path
+    pub clients: Vec<Client>,
+    pub host: Client,
+
+    // UI properties
+    pub name: String,
 }
 
 #[tokio::main]
 async fn main() {
     let clients: Clients = Arc::new(RwLock::new(HashMap::new())); // initialize using the created type
+    let rooms: Rooms = Arc::new(RwLock::new(HashMap::new())); // initialize the rooms
 
     let health_route = warp::path!("health").and_then(handler::health_handler); // add the health route which just returns 200 OK everytime, checks if the server is running
 
@@ -31,6 +43,8 @@ async fn main() {
         .and(warp::post())
         .and(warp::body::json())
         .and(with_clients(clients.clone())) // inject the shared state of Clients into the handler
+        .and(with_rooms(rooms.clone())) // inject the shared state of Rooms into the handler
+        .and(warp::header::headers_cloned())
         .and_then(handler::register_handler)
         .or(register
             .and(warp::delete())
@@ -43,9 +57,8 @@ async fn main() {
         .and(with_clients(clients.clone()))
         .and_then(handler::publish_handler);
 
-    let ws_route = warp::path("ws")
+    let ws_route = warp::path!("ws" / String)
         .and(warp::ws())
-        .and(warp::path::param())
         .and(with_clients(clients.clone()))
         .and_then(handler::ws_handler);
 
@@ -107,4 +120,8 @@ async fn main() {
 
 fn with_clients(clients: Clients) -> impl Filter<Extract = (Clients,), Error = Infallible> + Clone {
     warp::any().map(move || clients.clone())
+}
+
+fn with_rooms(rooms: Rooms) -> impl Filter<Extract = (Rooms,), Error = Infallible> + Clone {
+    warp::any().map(move || rooms.clone())
 }

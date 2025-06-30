@@ -1,4 +1,4 @@
-use crate::{ws, Client, Clients, Result};
+use crate::{ws, Client, Clients, Room, Rooms, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp::{http::StatusCode, reply::json, ws::Message, Reply};
@@ -9,7 +9,6 @@ use serde_json::Value;
 
 #[derive(Deserialize, Debug)]
 pub struct RegisterRequest {
-    user_id: usize,
     topic: String,
 }
 
@@ -28,13 +27,13 @@ pub struct RegisterResponse {
 #[derive(Deserialize, Debug)]
 pub struct Event {
     topic: String,
-    user_id: Option<usize>,
+    user_id: Option<String>,
     message: String,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct MediaIncomingRequest {
-    user_id: usize,
+    user_id: String,
     topic: Option<String>,
     timestamp: u64,
     array: Vec<u8>
@@ -42,7 +41,7 @@ pub struct MediaIncomingRequest {
 
 #[derive(Serialize, Debug)]
 pub struct MediaOutgoingRequest {
-    user_id: usize,
+    user_id: String,
     timestamp: u64,
     array: Vec<u8>
 }
@@ -77,7 +76,7 @@ pub async fn callback(query: AuthCodeQuery) -> Result<impl Reply> {
     println!("Authentication successful, redirecting...");
 
     let redirect_uri = Uri::builder()
-        .path_and_query("/room")
+        .path_and_query("/Home")
         .build()
         .unwrap();
     
@@ -141,7 +140,7 @@ pub async fn publish_handler(body: Event, clients: Clients) -> Result<impl Reply
         .read()
         .await
         .iter()
-        .filter(|(_, client)| match body.user_id {
+        .filter(|(_, client)| match body.user_id.clone() {
             Some(v) => client.user_id == v, // if body.user_id is not None, filter by user_id
             None => true, // if body.user_id is None, do not filter by user_id and send to ALL clients
         })
@@ -155,27 +154,130 @@ pub async fn publish_handler(body: Event, clients: Clients) -> Result<impl Reply
     Ok(StatusCode::OK)
 }
 
-pub async fn register_handler(body: RegisterRequest, clients: Clients) -> Result<impl Reply> {
-    println!("register_handler: {}", body.user_id);
-    let user_id = body.user_id;
-    let topic = body.topic; // Capture the entry topic
-    let uuid = Uuid::new_v4().as_simple().to_string();
+pub async fn register_handler(body: RegisterRequest, clients: Clients, rooms: Rooms, headers: header::HeaderMap) -> Result<impl Reply> {
+    println!("register_handler: {}", body.topic);
 
-    register_client(uuid.clone(), user_id, topic, clients).await; // Pass the entry topic
+    let new_room_id = Uuid::new_v4().as_simple().to_string();
+    // Client.user_id = body.user_id;
+
+    let cookies = headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let access_token = cookies
+        .split(';')
+        .find_map(|s| {
+            let cookie = Cookie::parse(s.trim()).ok()?;
+            if cookie.name() == "access_token" {
+                Some(cookie.value().to_string())
+            } else {
+                None
+            }
+        });
+
+    let access_token = match access_token {
+        Some(token) => token,
+        None => {
+            println!("Access token not found in cookies");
+            return Ok(json(&RegisterResponse {
+                url: "Unauthorized".to_string(),
+            }));
+        }
+    };
+
+    // Get Spotify user ID
+    let http_client = reqwest::Client::new();
+
+    println!("Sending GET request to Spotify API...");
+
+    let spotify_res = http_client
+        .get("https://api.spotify.com/v1/me")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|_| warp::reject::custom(HttpError))?;
+
+    // TODO: Spotify will send "EMPTY_RESPONSE" when no music has been playing for a while, handle that case
+
+    let json_body: Value = spotify_res
+        .json()
+        .await
+        .map_err(|_| warp::reject::custom(HttpError))?;
+
+    // Extract user ID from the Spotify response
+    let user_id = json_body
+        .get("id")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+
+    println!("Spotify user ID: {:?}", user_id);
+
+    if user_id.is_none() {
+        println!("Spotify user ID not found in response");
+        return Ok(json(&RegisterResponse {
+                url: "Unauthorized".to_string(),
+            }));
+    }
+
+    let new_client = register_client(
+        user_id.expect("Spotify user does not exist"), 
+        body.topic.clone(), 
+        clients.clone()
+    ).await;
+
+    // check if topic name already exists in Rooms
+    if rooms.read().await.contains_key(&body.topic) {
+        // host does not change, just return the existing room
+        let mut existing_room = rooms.read().await.get(&body.topic).cloned();
+        // Add the new client to the existing room
+        if let Some(ref mut room) = existing_room {
+            room.clients.push(new_client.clone());
+            rooms.write().await.insert(body.topic.clone(), room.clone());
+        } 
+
+        return Ok(json(&RegisterResponse {
+            url: format!("wss://127.0.0.1:443/ws/{}", existing_room.unwrap().id 
+        )}));
+    }
+
+
+    let new_room = Room {
+        id: new_room_id.clone(),
+        clients: vec![],
+        host: new_client.clone(),
+        name: body.topic.clone(), // Default room name, can be changed later
+    };
+
+    rooms.write().await.insert(body.topic.clone(), new_room);
+
     Ok(json(&RegisterResponse {
-        url: format!("ws://127.0.0.1:8000/ws/{}", uuid),
+        url: format!("wss://127.0.0.1/ws/{}", new_room_id),
     }))
 }
 
-async fn register_client(id: String, user_id: usize, topic: String, clients: Clients) {
+/**
+* Registers a new client with a unique ID, user ID, and topic.
+* Inserts the client into the shared clients map.
+* Returns the newly created client.
+* # Arguments
+* * `id` - A unique identifier for the client.
+* * `user_id` - Spotify user ID of the client.
+* * `topic` - The topic the client is interested in.
+* * `clients` - A shared map of clients, protected by a read-write lock.
+*/
+async fn register_client(user_id: String, topic: String, clients: Clients) -> Client {
+    let new_client = Client {
+        user_id: user_id.clone(),
+        topics: vec![topic],
+        sender: None,
+    };
     clients.write().await.insert(
-        id,
-        Client {
-            user_id,
-            topics: vec![topic],
-            sender: None,
-        },
+        user_id.clone(),
+        new_client.clone(),
     );
+
+    return new_client.clone();
 }
 
 pub async fn unregister_handler(id: String, clients: Clients) -> Result<impl Reply> {
@@ -184,11 +286,11 @@ pub async fn unregister_handler(id: String, clients: Clients) -> Result<impl Rep
     Ok(StatusCode::OK)
 }
 
-pub async fn ws_handler(ws: warp::ws::Ws, id: String, clients: Clients) -> Result<impl Reply> {
+pub async fn ws_handler(id: String, ws: warp::ws::Ws, clients: Clients) -> Result<impl Reply> {
     println!("ws_handler: {}", id);
     let client = clients.read().await.get(&id).cloned();
     match client {
-        Some(c) => Ok(ws.on_upgrade(move |socket| ws::client_connection(socket, id, clients, c))),
+        Some(c) => Ok(ws.on_upgrade(move |socket| ws::client_comaknnection(socket, id, clients, c))),
         None => Err(warp::reject::not_found()),
     }
 }
@@ -220,7 +322,7 @@ pub async fn broadcast(body: MediaIncomingRequest, clients: Clients) -> Result<i
     println!("publish_handler: {:?}", body.topic);
 
     let response = MediaOutgoingRequest {
-        user_id: body.user_id, 
+        user_id: body.user_id.clone(), 
         timestamp: body.timestamp,
         array: body.array.clone(),
     };
@@ -229,7 +331,7 @@ pub async fn broadcast(body: MediaIncomingRequest, clients: Clients) -> Result<i
         .read()
         .await
         .iter()
-        .filter(|(_, client)| client.user_id != body.user_id)
+        .filter(|(_, client)| client.user_id != body.user_id.clone()) // filter out the sender
         .filter(|(_, client)| match &body.topic {
             Some(t) => client.topics.contains(t) , // if body.user_id is not None, filter by user_id
             None => true, // if body.user_id is None, do not filter by user_id and send to ALL clients

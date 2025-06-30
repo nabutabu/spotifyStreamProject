@@ -34,7 +34,7 @@ export default function Home() {
       const response = await fetch(`${API_BASE_URL}/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: userId, topic: topic.trim() }),
+        body: JSON.stringify({ topic: topic.trim() }),
       });
       setUserId((prev) => prev + 1);
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
@@ -42,7 +42,7 @@ export default function Home() {
       const websocketUrl = data.url;
       // On success, navigate to the Room page with wsUrl
 
-      const isSpotifyAuthenticated = getCookie('access_token');
+      const isSpotifyAuthenticated = getCookie('isAuthenticated') === 'true';
 
       if(!isSpotifyAuthenticated) {
         navigate(`/SpotifyLogin`, { state: { userId, topic, wsUrl: websocketUrl }});
