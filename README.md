@@ -6,15 +6,18 @@ It uses a **Rust backend (Warp and Tokio)** and a **React frontend**, with **Web
 ---
 
 ## Purpose
-The purpose of this v1 of the project is as follows:
-- Understand how Rust works
-- Understand how WebSockets work
-- Understand the underlying HTTP protocols and upgrading of the HTTP TCP to a WebSocket
-- Make a project that makes a practical use of WebSockets
-- Understand why architecture needs to change and why there is a need for Redis/Kafka:
-    - Sets the stage for v2 of the project where I will try to use Redis to maintain rooms (or topics) in order to understand how Redis works
-    - My current architecture has a bottle-neck as it cannot scale up. The application is stateful as it maintains state of where the host playback is
-    - The next step is to offload this state maintainence to Redis and make the app stateless and deployable through AWS App Runner or Elastic Beanstalk
+
+The goals of this **v1** implementation are:
+
+- Gain a deeper understanding of **Rust** by building a real-world backend service.
+- Learn the fundamentals of **WebSockets**, including connection lifecycle and bidirectional communication.
+- Explore the underlying **HTTP protocol** and how HTTP/1.1 requests can be upgraded to persistent WebSocket connections.
+- Build a practical application that demonstrates how WebSockets can be applied to synchronize state across multiple clients.
+- Establish a foundation for exploring distributed systems:
+  - Highlight architectural limitations of a fully **stateful backend**, where playback state is stored in memory and restricts scalability.
+  - Prepare for **v2**, which will introduce **Redis** as a pub/sub system for managing rooms (or topics). This will enable the application to become **stateless**, offload state management, and scale horizontally.
+  - Experiment with deploying a stateless version to cloud platforms such as **AWS App Runner** or **Elastic Beanstalk**.
+
 
 
 ## Features
