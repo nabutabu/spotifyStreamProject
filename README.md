@@ -1,5 +1,5 @@
 # 🎵 Spotify Sync Playback Across Multiple Users (Jam)
-
+*** THIS DOES NOT STREAM THE MUSIC ITSELF ***
 This project allows multiple users to join a shared room and listen to Spotify tracks **in sync**.  
 It uses a **Rust backend (Warp and Tokio)** and a **React frontend**, with **WebSockets** to broadcast live playback state between connected clients.
 
