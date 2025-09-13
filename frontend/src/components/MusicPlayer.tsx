@@ -71,11 +71,6 @@ export default function MusicPlayer() {
 
   useEffect(() => {
     checkAccessToken();
-    
-    // Check periodically for updates
-    const interval = setInterval(checkAccessToken, 5000);
-    
-    return () => clearInterval(interval);
   }, []);
 
   const formatDuration = (ms) => {

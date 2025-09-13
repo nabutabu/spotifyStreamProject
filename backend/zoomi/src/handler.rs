@@ -1,4 +1,4 @@
-use crate::{ws, Client, Clients, Room, Rooms, Result};
+use crate::{ws, Client, Clients, Room, Rooms, Result, PlaybackState};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp::{http::StatusCode, reply::json, ws::Message, Reply};
@@ -6,6 +6,8 @@ use base64::{engine::general_purpose, Engine as _};
 use warp::http::{Response, Uri, HeaderValue, header};
 use cookie::Cookie;
 use serde_json::Value;
+use chrono::Utc;
+use std::{sync::Arc, time::Duration};
 
 #[derive(Deserialize, Debug)]
 pub struct RegisterRequest {
@@ -22,6 +24,7 @@ pub struct TopicActionRequest {
 #[derive(Serialize, Debug)]
 pub struct RegisterResponse {
     url: String,
+    spotify_id: String
 }
 
 #[derive(Deserialize, Debug)]
@@ -182,6 +185,7 @@ pub async fn register_handler(body: RegisterRequest, clients: Clients, rooms: Ro
             println!("Access token not found in cookies");
             return Ok(json(&RegisterResponse {
                 url: "Unauthorized".to_string(),
+                spotify_id: "Unauthorized".to_string(),
             }));
         }
     };
@@ -193,7 +197,7 @@ pub async fn register_handler(body: RegisterRequest, clients: Clients, rooms: Ro
 
     let spotify_res = http_client
         .get("https://api.spotify.com/v1/me")
-        .bearer_auth(access_token)
+        .bearer_auth(access_token.clone())
         .send()
         .await
         .map_err(|_| warp::reject::custom(HttpError))?;
@@ -217,11 +221,13 @@ pub async fn register_handler(body: RegisterRequest, clients: Clients, rooms: Ro
         println!("Spotify user ID not found in response");
         return Ok(json(&RegisterResponse {
                 url: "Unauthorized".to_string(),
+                spotify_id: "Unauthorized".to_string(),
             }));
     }
 
     let new_client = register_client(
-        user_id.expect("Spotify user does not exist"), 
+        new_room_id.clone(), 
+        user_id.clone().expect("Reason"),
         body.topic.clone(), 
         clients.clone()
     ).await;
@@ -237,8 +243,9 @@ pub async fn register_handler(body: RegisterRequest, clients: Clients, rooms: Ro
         } 
 
         return Ok(json(&RegisterResponse {
-            url: format!("wss://127.0.0.1:443/ws/{}", existing_room.unwrap().id 
-        )}));
+            url: format!("wss://127.0.0.1:443/ws/{}", existing_room.unwrap().id),
+            spotify_id: user_id.clone().expect("REASON"),
+    }));
     }
 
 
@@ -247,12 +254,17 @@ pub async fn register_handler(body: RegisterRequest, clients: Clients, rooms: Ro
         clients: vec![],
         host: new_client.clone(),
         name: body.topic.clone(), // Default room name, can be changed later
+        host_access_token: access_token.clone(),
+        last_playback_state: None,
     };
 
-    rooms.write().await.insert(body.topic.clone(), new_room);
+    spawn_room_polling(new_room_id.clone(), rooms.clone(), clients.clone());
+
+    rooms.write().await.insert(new_room_id.clone(), new_room);
 
     Ok(json(&RegisterResponse {
         url: format!("wss://127.0.0.1/ws/{}", new_room_id),
+        spotify_id: user_id.clone().expect("REASON"),
     }))
 }
 
@@ -266,14 +278,14 @@ pub async fn register_handler(body: RegisterRequest, clients: Clients, rooms: Ro
 * * `topic` - The topic the client is interested in.
 * * `clients` - A shared map of clients, protected by a read-write lock.
 */
-async fn register_client(user_id: String, topic: String, clients: Clients) -> Client {
+async fn register_client(room_id: String, user_id: String, topic: String, clients: Clients) -> Client {
     let new_client = Client {
         user_id: user_id.clone(),
         topics: vec![topic],
         sender: None,
     };
     clients.write().await.insert(
-        user_id.clone(),
+        room_id.clone(),
         new_client.clone(),
     );
 
@@ -289,8 +301,9 @@ pub async fn unregister_handler(id: String, clients: Clients) -> Result<impl Rep
 pub async fn ws_handler(id: String, ws: warp::ws::Ws, clients: Clients) -> Result<impl Reply> {
     println!("ws_handler: {}", id);
     let client = clients.read().await.get(&id).cloned();
+    
     match client {
-        Some(c) => Ok(ws.on_upgrade(move |socket| ws::client_comaknnection(socket, id, clients, c))),
+        Some(c) => Ok(ws.on_upgrade(move |socket| ws::client_connection(socket, id, clients, c))),
         None => Err(warp::reject::not_found()),
     }
 }
@@ -350,6 +363,52 @@ pub async fn broadcast(body: MediaIncomingRequest, clients: Clients) -> Result<i
 
 
 /******************* SPOTIFY FUNCTIONS **********************/
+pub async fn get_user_profile(headers: header::HeaderMap) -> Result<Box<dyn Reply>> {
+    println!("/get_user_profile");
+    let cookies = headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let access_token = cookies
+        .split(';')
+        .find_map(|s| {
+            let cookie = Cookie::parse(s.trim()).ok()?;
+            if cookie.name() == "access_token" {
+                Some(cookie.value().to_string())
+            } else {
+                None
+            }
+        });
+
+    let access_token = match access_token {
+        Some(token) => token,
+        None => {
+            let res = warp::reply::with_status("Unauthorized", StatusCode::UNAUTHORIZED);
+            return Ok(Box::new(res));
+        }
+    };
+
+    let http_client = reqwest::Client::new();
+
+    println!("Sending GET request to v1/me/...");
+
+    let spotify_res = http_client
+        .get("https://api.spotify.com/v1/me/")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|_| warp::reject::custom(HttpError))?;
+
+    // TODO: Spotify will send "EMPTY_RESPONSE" when no music has been playing for a while, handle that case
+
+    let json_body: Value = spotify_res
+        .json()
+        .await
+        .map_err(|_| warp::reject::custom(HttpError))?;
+
+    Ok(Box::new(json(&json_body)))
+}
 
 pub async fn current_song(headers: header::HeaderMap) -> Result<Box<dyn Reply>> {
     let cookies = headers
@@ -378,7 +437,7 @@ pub async fn current_song(headers: header::HeaderMap) -> Result<Box<dyn Reply>> 
 
     let http_client = reqwest::Client::new();
 
-    println!("Sending GET request to Spotify API...");
+    println!("Sending GET request to /v1/me/player/currently-playing...");
 
     let spotify_res = http_client
         .get("https://api.spotify.com/v1/me/player/currently-playing")
@@ -424,7 +483,7 @@ pub async fn get_queue(headers: header::HeaderMap) -> Result<Box<dyn Reply>> {
 
     let http_client = reqwest::Client::new();
 
-    println!("Sending GET request to Spotify API...");
+    println!("Sending GET request to /v1/me/player/queue...");
 
     let spotify_res = http_client
         .get("https://api.spotify.com/v1/me/player/queue")
@@ -442,3 +501,89 @@ pub async fn get_queue(headers: header::HeaderMap) -> Result<Box<dyn Reply>> {
 
     Ok(Box::new(json(&json_body)))
 }
+
+pub fn spawn_room_polling(room_id: String, rooms: Rooms, clients: Clients) {
+    println!("/spawn_room_polling");
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+
+        loop {
+            {
+                let mut rooms_guard = rooms.write().await;
+
+                if let Some(room) = rooms_guard.get_mut(&room_id) {
+                    if let Some(new_state) = poll_host_state(&client, &room.host_access_token).await {
+                        let changed = room
+                            .last_playback_state
+                            .as_ref()
+                            .map(|old| old.track_uri != new_state.track_uri
+                                || old.position_ms / 5000 != new_state.position_ms / 5000 // bucket to 5s chunks
+                                || old.queue != new_state.queue)
+                            .unwrap_or(true);
+
+                        if changed {
+                            room.last_playback_state = Some(new_state.clone());
+                            broadcast_state(&room.id, new_state, &clients).await;
+                        }
+                    }
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+}
+
+async fn poll_host_state(http: &reqwest::Client, token: &str) -> Option<PlaybackState> {
+    println!("/poll_host_state");
+    let playback = http
+        .get("https://api.spotify.com/v1/me/player")
+        .bearer_auth(token)
+        .send()
+        .await.ok()?
+        .json::<serde_json::Value>()
+        .await.ok()?;
+
+    let queue_resp = http
+        .get("https://api.spotify.com/v1/me/player/queue")
+        .bearer_auth(token)
+        .send()
+        .await.ok()?
+        .json::<serde_json::Value>()
+        .await.ok()?;
+
+    let track_uri = playback["item"]["uri"].as_str()?.to_string();
+    let progress_ms = playback["progress_ms"].as_u64().unwrap_or(0);
+
+    let queue: Vec<String> = queue_resp["queue"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|t| t["uri"].as_str().map(|s| s.to_string()))
+        .collect();
+
+    Some(PlaybackState {
+        track_uri,
+        position_ms: progress_ms,
+        queue,
+        timestamp: Utc::now().timestamp_millis() as u128,
+    })
+}
+
+async fn broadcast_state(room_id: &str, state: PlaybackState, clients: &Clients) -> Result<impl Reply> {
+    println!("broadcast_state {}", room_id.clone());
+    let msg = serde_json::to_string(&state).unwrap();
+
+    clients
+        .read()
+        .await
+        .iter()
+        .for_each(|(_, client)| {
+            if let Some(sender) = &client.sender { // check if sender is not None and bind the value of client.sender to sender
+                let _ = sender.send(Ok(Message::text(msg.clone())));
+            }   
+        });
+
+    Ok(StatusCode::OK)
+}
+

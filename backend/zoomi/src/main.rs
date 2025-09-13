@@ -5,6 +5,7 @@ use handler::TopicActionRequest;
 use tokio::sync::{mpsc, RwLock};
 use warp::{ws::Message, Filter, Rejection};
 use crate::handler::{add_topic, remove_topic};
+use serde::{Serialize, Deserialize};
 
 mod handler;
 mod ws;
@@ -20,11 +21,23 @@ pub struct Client {
     pub sender: Option<mpsc::UnboundedSender<std::result::Result<Message, warp::Error>>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackState {
+    pub track_uri: String,
+    pub position_ms: u64,
+    pub queue: Vec<String>,
+    pub timestamp: u128, // unix millis when captured
+}
+
 #[derive(Debug, Clone)]
 pub struct Room {
-    pub id: String, // the room id also serves as the ws path
+    pub id: String,
     pub clients: Vec<Client>,
     pub host: Client,
+
+    // Spotify host info
+    pub host_access_token: String,
+    pub last_playback_state: Option<PlaybackState>,
 
     // UI properties
     pub name: String,
@@ -88,6 +101,11 @@ async fn main() {
         .and_then(handler::callback);
     
     // SPOTIFY ROUTES
+    let get_user_profile = warp::path("get_user_profile")
+        .and(warp::get())
+        .and(warp::header::headers_cloned())
+        .and_then(handler::get_user_profile);
+
     let current_song_route = warp::path("current_song")
         .and(warp::get())
         .and(warp::header::headers_cloned())
