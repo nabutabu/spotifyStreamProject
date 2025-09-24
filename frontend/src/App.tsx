@@ -7,7 +7,8 @@ function App() {
   return (
     <div>
       <Routes>
-        <Route path="/" element={<Home />} />
+        <Route path="/" element={<SpotifyLogin />} />
+        <Route path="/Home" element={<Home />} />
         <Route path="/SpotifyLogin" element={<SpotifyLogin />} />
         <Route path="/room/:topic" element={<Room />} />
       </Routes>

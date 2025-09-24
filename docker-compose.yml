@@ -19,3 +19,13 @@ services:
       - ./nginx/certs:/etc/nginx/certs:ro
     depends_on:
       - backend
+    
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      # Persist Redis data
+      - ./data/redis:/data

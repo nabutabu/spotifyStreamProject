@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { ChevronsLeftRightEllipsisIcon } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 const API_BASE_URL = 'https://127.0.0.1:443/api';
@@ -7,7 +8,7 @@ export default function Home() {
   const [topic, setTopic] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-  const [userId, setUserId] = useState(1);
+  const [userId, setUserId] = useState("");
   const navigate = useNavigate();
 
   function getCookie(name: string): string | null {
@@ -34,21 +35,27 @@ export default function Home() {
       const response = await fetch(`${API_BASE_URL}/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: userId, topic: topic.trim() }),
+        body: JSON.stringify({ topic: topic.trim() }),
       });
-      setUserId((prev) => prev + 1);
+      
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      
       const data = await response.json();
       const websocketUrl = data.url;
+      const id = data.spotify_id;
+
+      setUserId(data.spotify_id);
+
       // On success, navigate to the Room page with wsUrl
 
-      const isSpotifyAuthenticated = getCookie('access_token');
+      const isSpotifyAuthenticated = getCookie('isAuthenticated') === 'true';
 
       if(!isSpotifyAuthenticated) {
-        navigate(`/SpotifyLogin`, { state: { userId, topic, wsUrl: websocketUrl }});
+        navigate(`/SpotifyLogin`, { state: 
+          { id, topic, wsUrl: websocketUrl }});
       }
       else {
-        navigate(`/room/${encodeURIComponent(topic.trim())}`, { state: { userId, wsUrl: websocketUrl } });
+        navigate(`/room/${encodeURIComponent(topic.trim())}`, { state: { id, wsUrl: websocketUrl } });
       }
     }
     catch (err) {
@@ -57,6 +64,10 @@ export default function Home() {
       setIsLoading(false);
     }
   };
+
+  useEffect(() => {
+    console.log("here");
+  }, [userId]);
 
   return (
     <div className="min-h-screen bg-gray-50 p-4">

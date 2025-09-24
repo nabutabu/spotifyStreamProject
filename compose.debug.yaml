@@ -1,0 +1,6 @@
+services:
+  spotifystreamproject:
+    image: spotifystreamproject
+    build:
+      context: .
+      dockerfile: ./Dockerfile

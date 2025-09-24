@@ -9,7 +9,7 @@ export default function Room() {
   const { topic } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
-  const [userId] = useState(location.state?.userId || 1);
+  const [userId] = useState(location.state?.id || "");
   const [wsUrl] = useState(location.state?.wsUrl || '');
 
   const [isConnected, setIsConnected] = useState(false);
@@ -187,6 +187,29 @@ export default function Room() {
     }
   };
 
+  // Define the PlaybackState type
+  interface PlaybackState {
+    track_uri: string;
+    position_ms: number;
+    queue: string[];
+    timestamp: number; // unix millis
+  }
+
+  // Type guard function
+  function isPlaybackState(data: unknown): data is PlaybackState {
+    if (typeof data !== "object" || data === null) return false;
+
+    const obj = data as Record<string, unknown>;
+
+    return (
+      typeof obj.track_uri === "string" &&
+      typeof obj.position_ms === "number" &&
+      Array.isArray(obj.queue) &&
+      obj.queue.every((item) => typeof item === "string") &&
+      typeof obj.timestamp === "number"
+    );
+  }
+
   // Connect to WebSocket with retry logic
   const connectWebSocket = (url) => {
     try {
@@ -219,6 +242,36 @@ export default function Room() {
         try {
           const data = JSON.parse(event.data);
           console.log('Parsed message data:', data);
+
+          // Check if this looks like a PlaybackState
+          if (isPlaybackState(data)) {
+            console.log("PlaybackState received:", data);
+
+            // Use Spotify API to update playback
+            try {
+              const accessToken = localStorage.getItem("access_token"); // adjust to your token storage
+              if (!accessToken) {
+                console.warn("No Spotify access token available");
+                return;
+              }
+
+              fetch("https://api.spotify.com/v1/me/player/play", {
+                method: "PUT",
+                headers: {
+                  "Authorization": `Bearer ${accessToken}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  uris: [data.track_uri],
+                  position_ms: data.position_ms,
+                }),
+              });
+
+              console.log("Updated Spotify playback to match state.");
+            } catch (err) {
+              console.error("Error syncing Spotify playback:", err);
+            }
+          }
           
           const messageId = generateMessageId();
           const currentMessageCount = messagesRef.current.length;
