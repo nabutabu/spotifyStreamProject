@@ -1,4 +1,4 @@
-use crate::{ws, Client, Clients, Room, Rooms, Result, PlaybackState};
+use crate::{ws, Client, Clients, Room, Rooms, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp::{http::StatusCode, reply::json, ws::Message, Reply};
@@ -7,7 +7,10 @@ use warp::http::{Response, Uri, HeaderValue, header};
 use cookie::Cookie;
 use serde_json::Value;
 use chrono::Utc;
-use std::{sync::Arc, time::Duration};
+use std::{time::Duration};
+use crate::repository::PlaybackState;
+use std::sync::Arc;
+use crate::repository::{RoomManager, WebSocketMessage};
 
 #[derive(Deserialize, Debug)]
 pub struct RegisterRequest {
@@ -31,7 +34,7 @@ pub struct RegisterResponse {
 pub struct Event {
     topic: String,
     user_id: Option<String>,
-    message: String,
+    message: WebSocketMessage,
 }
 
 #[derive(Deserialize, Debug)]
@@ -62,6 +65,13 @@ struct TokenResponse {
     expires_in: u64,
     refresh_token: String,
     scope: String,
+}
+
+#[derive(Serialize)]
+pub struct ApiResponse<T> {
+    pub success: bool,
+    pub data: Option<T>,
+    pub message: Option<String>,
 }
 
 #[derive(Debug)]
@@ -137,27 +147,53 @@ async fn authenticate(code: &str, redirect_uri: &str) -> Result<TokenResponse> {
 }
 
 
-pub async fn publish_handler(body: Event, clients: Clients) -> Result<impl Reply> {
+pub async fn publish_handler(body: Event, clients: Clients, room_manager: Arc<RoomManager>) -> Result<impl Reply> {
     println!("publish_handler: {}", body.topic);
-    clients
-        .read()
-        .await
-        .iter()
-        .filter(|(_, client)| match body.user_id.clone() {
-            Some(v) => client.user_id == v, // if body.user_id is not None, filter by user_id
-            None => true, // if body.user_id is None, do not filter by user_id and send to ALL clients
-        })
-        .filter(|(_, client)| client.topics.contains(&body.topic))
-        .for_each(|(_, client)| {
-            if let Some(sender) = &client.sender { // check if sender is not None and bind the value of client.sender to sender
-                let _ = sender.send(Ok(Message::text(body.message.clone())));
-            }
-        });
+    // clients
+    //     .read()
+    //     .await
+    //     .iter()
+    //     .filter(|(_, client)| match body.user_id.clone() {
+    //         Some(v) => client.user_id == v, // if body.user_id is not None, filter by user_id
+    //         None => true, // if body.user_id is None, do not filter by user_id and send to ALL clients
+    //     })
+    //     .filter(|(_, client)| client.topics.contains(&body.topic))
+    //     .for_each(|(_, client)| {
+    //         if let Some(sender) = &client.sender { // check if sender is not None and bind the value of client.sender to sender
+    //             let _ = sender.send(Ok(Message::text(body.message.clone())));
+    //         }
+    //     });
 
-    Ok(StatusCode::OK)
+    match room_manager.broadcast_to_room(&body.topic, body.message).await {
+        Ok(()) => {
+            // Broadcast was successful
+            let response = ApiResponse {
+                success: true,
+                data: Some("Message broadcast successfully".to_string()),
+                message: None,
+            };
+            return Ok(warp::reply::json(&response));
+        }
+        Err(e) => {
+            let response = ApiResponse::<()> {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to broadcast to room: {}", e)),
+            };
+            return Ok(warp::reply::json(&response));
+        }
+    }
+
+    let response = ApiResponse {
+        success: true,
+        data: Some("Message broadcast successfully".to_string()),
+        message: None,
+    };
+
+    Ok(warp::reply::json(&response))
 }
 
-pub async fn register_handler(body: RegisterRequest, clients: Clients, rooms: Rooms, headers: header::HeaderMap) -> Result<impl Reply> {
+pub async fn register_handler(body: RegisterRequest, clients: Clients, room_manager: Arc<RoomManager>, headers: header::HeaderMap) -> Result<impl Reply> {
     println!("register_handler: {}", body.topic);
 
     let new_room_id = Uuid::new_v4().as_simple().to_string();
@@ -233,37 +269,49 @@ pub async fn register_handler(body: RegisterRequest, clients: Clients, rooms: Ro
     ).await;
 
     // check if topic name already exists in Rooms
-    if rooms.read().await.contains_key(&body.topic) {
-        // host does not change, just return the existing room
-        let mut existing_room = rooms.read().await.get(&body.topic).cloned();
-        // Add the new client to the existing room
-        if let Some(ref mut room) = existing_room {
-            room.clients.push(new_client.clone());
-            rooms.write().await.insert(body.topic.clone(), room.clone());
-        } 
+    // if rooms.read().await.contains_key(&body.topic) {
+    //     // host does not change, just return the existing room
+    //     let mut existing_room = rooms.read().await.get(&body.topic).cloned();
+    //     // Add the new client to the existing room
+    //     if let Some(ref mut room) = existing_room {
+    //         room.clients.push(new_client.clone());
+    //         rooms.write().await.insert(body.topic.clone(), room.clone());
+    //     } 
 
-        return Ok(json(&RegisterResponse {
-            url: format!("wss://127.0.0.1:443/ws/{}", existing_room.unwrap().id),
-            spotify_id: user_id.clone().expect("REASON"),
-    }));
-    }
-
-
-    let new_room = Room {
-        id: new_room_id.clone(),
-        clients: vec![],
-        host: new_client.clone(),
-        name: body.topic.clone(), // Default room name, can be changed later
-        host_access_token: access_token.clone(),
-        last_playback_state: None,
+    //     return Ok(json(&RegisterResponse {
+    //         url: format!("wss://127.0.0.1:443/ws/{}", existing_room.unwrap().id),
+    //         spotify_id: user_id.clone().expect("REASON"),
+    // }));
+    // }
+    
+    let room = match room_manager.create_room(&new_room_id, &user_id.clone().expect("REASON")).await {
+        Ok(room) => room,
+        Err(e) => {
+            let response = ApiResponse::<()> {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to create room: {}", e)),
+            };
+            return Ok(warp::reply::json(&response));
+        }
     };
 
-    spawn_room_polling(new_room_id.clone(), rooms.clone(), clients.clone());
 
-    rooms.write().await.insert(new_room_id.clone(), new_room);
+    // let new_room = Room {
+    //     id: new_room_id.clone(),
+    //     clients: vec![],
+    //     host: new_client.clone(),
+    //     name: body.topic.clone(), // Default room name, can be changed later
+    //     host_access_token: access_token.clone(),
+    //     last_playback_state: None,
+    // };
+
+    // spawn_room_polling(new_room_id.clone(), rooms.clone(), clients.clone());
+
+    // rooms.write().await.insert(new_room_id.clone(), new_room);
 
     Ok(json(&RegisterResponse {
-        url: format!("wss://127.0.0.1/ws/{}", new_room_id),
+        url: format!("wss://127.0.0.1/ws/{}", new_room_id.clone()),
         spotify_id: user_id.clone().expect("REASON"),
     }))
 }
@@ -298,7 +346,7 @@ pub async fn unregister_handler(id: String, clients: Clients) -> Result<impl Rep
     Ok(StatusCode::OK)
 }
 
-pub async fn ws_handler(id: String, ws: warp::ws::Ws, clients: Clients) -> Result<impl Reply> {
+pub async fn ws_handler(id: String, ws: warp::ws::Ws, clients: Clients, room_manager: Arc<RoomManager>) -> Result<impl Reply> {
     println!("ws_handler: {}", id);
     let client = clients.read().await.get(&id).cloned();
     

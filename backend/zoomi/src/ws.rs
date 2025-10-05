@@ -30,7 +30,7 @@ pub async fn client_connection(ws: WebSocket, id: String, clients: Clients, mut 
     client.sender = Some(client_sender);
     clients.write().await.insert(id.clone(), client);
 
-    println!("{} connected", id);
+    println!("{} connected", id); 
 
     while let Some(result) = client_ws_rcv.next().await {
         let msg = match result {

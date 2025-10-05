@@ -5,28 +5,24 @@ use handler::TopicActionRequest;
 use tokio::sync::{mpsc, RwLock};
 use warp::{ws::Message, Filter, Rejection};
 use crate::handler::{add_topic, remove_topic};
-use serde::{Serialize, Deserialize};
+use crate::repository::PlaybackState;
+use crate::repository::RoomManager;
 
 mod handler;
 mod ws;
+mod repository;
 
 type Result<T> = std::result::Result<T, Rejection>; // declaring the type of a sent Result
 type Clients = Arc<RwLock<HashMap<String, Client>>>; // declaring the type of a Client Map
 type Rooms = Arc<RwLock<HashMap<String, Room>>>; // declaring the type of a Room Map
+type SharedRoomManager = Arc<RoomManager>;
+
 
 #[derive(Debug, Clone)]
 pub struct Client {
     pub user_id: String,
     pub topics: Vec<String>,
     pub sender: Option<mpsc::UnboundedSender<std::result::Result<Message, warp::Error>>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlaybackState {
-    pub track_uri: String,
-    pub position_ms: u64,
-    pub queue: Vec<String>,
-    pub timestamp: u128, // unix millis when captured
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +44,15 @@ async fn main() {
     let clients: Clients = Arc::new(RwLock::new(HashMap::new())); // initialize using the created type
     let rooms: Rooms = Arc::new(RwLock::new(HashMap::new())); // initialize the rooms
 
+    // Create the RoomManager instead of clients HashMap
+    let room_manager = match RoomManager::new("redis://redis:6379") {
+        Ok(manager) => Arc::new(manager),
+        Err(e) => {
+            eprintln!("Failed to create RoomManager: {}", e);
+            return;
+        }
+    };
+
     let health_route = warp::path!("health").and_then(handler::health_handler); // add the health route which just returns 200 OK everytime, checks if the server is running
 
     // the register route adds a new client to this server room
@@ -56,7 +61,7 @@ async fn main() {
         .and(warp::post())
         .and(warp::body::json())
         .and(with_clients(clients.clone())) // inject the shared state of Clients into the handler
-        .and(with_rooms(rooms.clone())) // inject the shared state of Rooms into the handler
+        .and(with_room_manager(room_manager.clone())) // inject the shared state of Rooms into the handler
         .and(warp::header::headers_cloned())
         .and_then(handler::register_handler)
         .or(register
@@ -68,11 +73,13 @@ async fn main() {
     let publish = warp::path!("publish")
         .and(warp::body::json())
         .and(with_clients(clients.clone()))
+        .and(with_room_manager(room_manager.clone()))
         .and_then(handler::publish_handler);
 
     let ws_route = warp::path!("ws" / String)
         .and(warp::ws())
         .and(with_clients(clients.clone()))
+        .and(with_room_manager(room_manager.clone()))
         .and_then(handler::ws_handler);
 
     let clients_for_add = clients.clone();
@@ -132,6 +139,14 @@ async fn main() {
             .allow_headers(vec!["Content-Type"])
     );
 
+    // Setup graceful shutdown
+    let room_manager_shutdown = room_manager.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl+c");
+        println!("Shutting down gracefully...");
+        room_manager_shutdown.shutdown().await;
+    });
+
     println!("Listening on 127.0.0.1:8000");
     warp::serve(routes).run(([0, 0, 0, 0], 8000)).await;
 }
@@ -142,4 +157,9 @@ fn with_clients(clients: Clients) -> impl Filter<Extract = (Clients,), Error = I
 
 fn with_rooms(rooms: Rooms) -> impl Filter<Extract = (Rooms,), Error = Infallible> + Clone {
     warp::any().map(move || rooms.clone())
+}
+
+// Helper function to inject RoomManager into handlers
+fn with_room_manager(room_manager: SharedRoomManager) -> impl Filter<Extract = (SharedRoomManager,), Error = Infallible> + Clone {
+    warp::any().map(move || room_manager.clone())
 }
