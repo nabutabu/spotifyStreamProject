@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useLocation, useNavigate } from 'react-router-dom';
 
-const API_BASE_URL = 'https://127.0.0.1:443/api';
+const API_BASE_URL = 'https://192.168.1.123:443/api';
 
 // Music Player Component
 export default function MusicPlayer() {

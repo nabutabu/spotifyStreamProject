@@ -2,7 +2,7 @@ import { ChevronsLeftRightEllipsisIcon } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-const API_BASE_URL = 'https://127.0.0.1:443/api';
+const API_BASE_URL = 'https://192.168.1.123:443/api';
 
 export default function Home() {
   const [topic, setTopic] = useState('');
@@ -37,12 +37,13 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic: topic.trim() }),
       });
-      
+
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      
+
       const data = await response.json();
       const websocketUrl = data.url;
       const id = data.spotify_id;
+      const is_host = data.isHost;
 
       setUserId(data.spotify_id);
 
@@ -51,11 +52,11 @@ export default function Home() {
       const isSpotifyAuthenticated = getCookie('isAuthenticated') === 'true';
 
       if(!isSpotifyAuthenticated) {
-        navigate(`/SpotifyLogin`, { state: 
-          { id, topic, wsUrl: websocketUrl }});
+        navigate(`/SpotifyLogin`, { state:
+          { id, topic, wsUrl: websocketUrl, is_host }});
       }
       else {
-        navigate(`/room/${encodeURIComponent(topic.trim())}`, { state: { id, wsUrl: websocketUrl } });
+        navigate(`/room/${encodeURIComponent(topic.trim())}`, { state: { id, wsUrl: websocketUrl, is_host: is_host } });
       }
     }
     catch (err) {

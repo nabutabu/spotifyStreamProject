@@ -1,670 +1,292 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useLocation, useNavigate } from 'react-router-dom';
+import { usePlaybackHeartbeat } from '../hooks/usePlaybackHeartbeat';
+import { WebSocketProvider, useWebSocket } from '../contexts/WebSocketContext';
 import MusicPlayer from '../components/MusicPlayer';
 
-const API_BASE_URL = 'http://localhost:8000';
 const AUDIO_CHUNK_SIZE = 500;
 
-export default function Room() {
+// Inner component that uses WebSocket context
+function RoomContent() {
   const { topic } = useParams();
-  const location = useLocation();
   const navigate = useNavigate();
+  const location = useLocation();
   const [userId] = useState(location.state?.id || "");
-  const [wsUrl] = useState(location.state?.wsUrl || '');
+  const [isHost] = useState(location.state?.is_host || false);
 
-  const [isConnected, setIsConnected] = useState(false);
+  console.log("RoomContent props:", { topic, userId, isHost, locationState: location.state });
+
+  // Message state
   const [messages, setMessages] = useState([]);
-  const [messageInput, setMessageInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [connectionStatus, setConnectionStatus] = useState('disconnected');
-  const [serverHealth, setServerHealth] = useState(false);
+  const messagesRef = useRef([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
-  // Audio capture states
+  // UI states
+  const [messageInput, setMessageInput] = useState('');
+  const [isStreamPlaying, setIsStreamPlaying] = useState(false);
+  const [playbackVolume, setPlaybackVolume] = useState(0.7);
+  const [currentlyPlayingIndex, setCurrentlyPlayingIndex] = useState(-1);
+  const [error, setError] = useState('');
   const [isCapturing, setIsCapturing] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
   const [captureMode, setCaptureMode] = useState('tab');
-  
-  // Audio streaming states
-  const [isStreamPlaying, setIsStreamPlaying] = useState(false);
-  const [playbackVolume, setPlaybackVolume] = useState(0.7);
-  const [streamBuffer, setStreamBuffer] = useState([]);
-  const [currentlyPlayingIndex, setCurrentlyPlayingIndex] = useState(-1);
-  
-  const wsRef = useRef(null);
-  const mediaRecorderRef = useRef(null);
-  const streamRef = useRef(null);
-  const audioContextRef = useRef(null);
-  const analyserRef = useRef(null);
-  const audioChunksRef = useRef([]);
-  const audioElementsRef = useRef({});
-  const streamAudioRef = useRef(null);
+
+  // Playback sync state
+  const [syncedPlaybackState, setSyncedPlaybackState] = useState(null);
+
+  // Audio streaming queue and playback
   const streamQueueRef = useRef([]);
-  const isPlayingStreamRef = useRef(false);
-  const messagesRef = useRef([]);
-  const reconnectTimeoutRef = useRef(null);
-  const messageIdCounter = useRef(0);
+  const audioRef = useRef(null);
 
-  // Keep messagesRef in sync with messages state
-  useEffect(() => {
-    messagesRef.current = messages;
-  }, [messages]);
+  // WebSocket context - now includes lastMessage
+  const { isConnected, connectionStatus, sendMessage, lastMessage } = useWebSocket();
 
+  // Host heartbeat for playback sync
+  const { lastUpdate, error: heartbeatError } = usePlaybackHeartbeat(
+    isHost, 
+    topic || ''
+  );
+
+  // Display heartbeat errors
   useEffect(() => {
-    if (wsUrl && !isConnected) {
-      connectWebSocket(wsUrl);
+    if (heartbeatError) {
+      setError(`Playback sync error: ${heartbeatError}`);
     }
+  }, [heartbeatError]);
 
-    // Cleanup on unmount
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
+  // Manual heartbeat function
+  const sendManualHeartbeat = async () => {
+    try {
+      const accessToken = localStorage.getItem('access_token');
+      if (!accessToken) {
+        setError('No Spotify access token available');
+        return;
       }
-      
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      
-      // Clean up stream audio
-      stopAudioStream();
-      
-      // Clean up individual audio URLs
-      Object.values(audioElementsRef.current).forEach(audio => {
-        if (audio?.src) {
-          URL.revokeObjectURL(audio.src);
+
+      // Fetch current playback state
+      const response = await fetch('https://api.spotify.com/v1/me/player', {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`
         }
       });
-    };
-  }, [wsUrl]);
 
-  // Initialize streaming audio element
-  useEffect(() => {
-    streamAudioRef.current = new Audio();
-    streamAudioRef.current.volume = playbackVolume;
-    
-    streamAudioRef.current.onended = () => {
-      playNextInQueue();
-    };
-    
-    streamAudioRef.current.onerror = (e) => {
-      console.error('Stream audio error:', e);
-      setError('Audio stream playback error');
-      playNextInQueue();
-    };
-    
-    return () => {
-      if (streamAudioRef.current) {
-        streamAudioRef.current.pause();
-        if (streamAudioRef.current.src) {
-          URL.revokeObjectURL(streamAudioRef.current.src);
+      if (!response.ok) {
+        if (response.status === 204) {
+          setError('No active playback on Spotify');
+          return;
         }
+        throw new Error(`Failed to fetch playback: ${response.status}`);
       }
-    };
-  }, []);
 
-  // Generate unique message ID
-  const generateMessageId = () => {
-    messageIdCounter.current += 1;
-    return `msg_${Date.now()}_${messageIdCounter.current}`;
+      const data = await response.json();
+
+      // Fetch queue
+      let queue = [];
+      try {
+        const queueResponse = await fetch('https://api.spotify.com/v1/me/player/queue', {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`
+          }
+        });
+
+        if (queueResponse.ok) {
+          const queueData = await queueResponse.json();
+          queue = queueData.queue?.map((track) => track.uri) || [];
+        }
+      } catch (queueError) {
+        console.warn('Failed to fetch queue:', queueError);
+      }
+
+      // Send through WebSocket
+      sendMessage({
+        action: 'UpdatePlayback',
+        room_id: topic,
+        track_uri: data.item?.uri || '',
+        position_ms: data.progress_ms || 0,
+        queue,
+        timestamp: Date.now()
+      });
+
+      setError(''); // Clear any previous errors
+      console.log('Manual heartbeat sent successfully');
+    } catch (err) {
+      console.error('Manual heartbeat error:', err);
+      setError(`Manual heartbeat failed: ${err.message}`);
+    }
   };
 
-  // Add message using callback to avoid stale state
-  const addMessage = useCallback((newMessage) => {
-    setMessages(prevMessages => {
-      console.log('Adding message:', newMessage);
-      console.log('Previous messages count:', prevMessages.length);
-      const updatedMessages = [...prevMessages, newMessage];
-      console.log('New messages count:', updatedMessages.length);
-      return updatedMessages;
-    });
-  }, []);
+  // Fix: playNextChunk should always use the latest playbackVolume
+  const playbackVolumeRef = useRef(playbackVolume);
+  useEffect(() => {
+    playbackVolumeRef.current = playbackVolume;
+    if (audioRef.current) {
+      audioRef.current.volume = playbackVolume;
+    }
+  }, [playbackVolume]);
 
-  // Play next audio chunk in the streaming queue
-  const playNextInQueue = () => {
+  // Fix: playNextChunk should not be recreated on every render
+  const playNextChunk = useCallback(() => {
     if (streamQueueRef.current.length === 0) {
       setIsStreamPlaying(false);
-      isPlayingStreamRef.current = false;
       setCurrentlyPlayingIndex(-1);
       return;
     }
-    
-    const nextChunk = streamQueueRef.current.shift();
-    setCurrentlyPlayingIndex(nextChunk.index);
-    
-    if (streamAudioRef.current.src) {
-      URL.revokeObjectURL(streamAudioRef.current.src);
+    const { audioUrl, index } = streamQueueRef.current.shift();
+    setCurrentlyPlayingIndex(index);
+    setIsStreamPlaying(true);
+    if (!audioRef.current) {
+      audioRef.current = new Audio();
+      audioRef.current.onended = playNextChunk;
+      audioRef.current.onerror = playNextChunk;
     }
-    
-    streamAudioRef.current.src = nextChunk.audioUrl;
-    streamAudioRef.current.volume = playbackVolume;
-    
-    streamAudioRef.current.play().catch(error => {
-      console.error('Error playing stream chunk:', error);
-      playNextInQueue();
-    });
-  };
-
-  // Add audio chunk to streaming queue
-  const addToStreamQueue = (audioUrl, messageIndex) => {
-    streamQueueRef.current.push({ audioUrl, index: messageIndex });
-    
-    // If not currently playing, start the stream
-    if (!isPlayingStreamRef.current) {
-      setIsStreamPlaying(true);
-      isPlayingStreamRef.current = true;
-      playNextInQueue();
-    }
-  };
-
-  // Stop the audio stream
-  const stopAudioStream = () => {
-    if (streamAudioRef.current) {
-      streamAudioRef.current.pause();
-      if (streamAudioRef.current.src) {
-        URL.revokeObjectURL(streamAudioRef.current.src);
-        streamAudioRef.current.src = '';
-      }
-    }
-    
-    // Clear queue and clean up URLs
-    streamQueueRef.current.forEach(chunk => {
-      if (chunk.audioUrl) {
-        URL.revokeObjectURL(chunk.audioUrl);
-      }
-    });
-    streamQueueRef.current = [];
-    
-    setIsStreamPlaying(false);
-    isPlayingStreamRef.current = false;
-    setCurrentlyPlayingIndex(-1);
-  };
+    audioRef.current.src = audioUrl;
+    audioRef.current.volume = playbackVolumeRef.current;
+    audioRef.current.play().catch(() => playNextChunk());
+  }, []);
 
   // Update stream volume
-  const updateStreamVolume = (newVolume) => {
-    setPlaybackVolume(newVolume);
-    if (streamAudioRef.current) {
-      streamAudioRef.current.volume = newVolume;
-    }
+  const updateStreamVolume = (volume) => {
+    setPlaybackVolume(volume);
   };
 
-  // Define the PlaybackState type
-  interface PlaybackState {
-    track_uri: string;
-    position_ms: number;
-    queue: string[];
-    timestamp: number; // unix millis
-  }
-
-  // Type guard function
-  function isPlaybackState(data: unknown): data is PlaybackState {
-    if (typeof data !== "object" || data === null) return false;
-
-    const obj = data as Record<string, unknown>;
-
-    return (
-      typeof obj.track_uri === "string" &&
-      typeof obj.position_ms === "number" &&
-      Array.isArray(obj.queue) &&
-      obj.queue.every((item) => typeof item === "string") &&
-      typeof obj.timestamp === "number"
-    );
-  }
-
-  // Connect to WebSocket with retry logic
-  const connectWebSocket = (url) => {
-    try {
-      setConnectionStatus('connecting');
-      console.log('Connecting to WebSocket:', url);
-      
-      // Close existing connection if any
-      if (wsRef.current) {
-        wsRef.current.close();
+  // Stop audio stream
+  const stopAudioStream = () => {
+    setIsStreamPlaying(false);
+    setCurrentlyPlayingIndex(-1);
+    if (audioRef.current) {
+      audioRef.current.pause();
+      if (audioRef.current.src) {
+        URL.revokeObjectURL(audioRef.current.src);
+        audioRef.current.src = '';
       }
-      
-      wsRef.current = new WebSocket(url);
-
-      wsRef.current.onopen = () => {
-        setIsConnected(true);
-        setConnectionStatus('connected');
-        setError('');
-        console.log('WebSocket connected successfully');
-        
-        // Clear any reconnection timeout
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-          reconnectTimeoutRef.current = null;
-        }
-      };
-
-      wsRef.current.onmessage = (event) => {
-        console.log('WebSocket message received:', event.data);
-        
-        try {
-          const data = JSON.parse(event.data);
-          console.log('Parsed message data:', data);
-
-          // Check if this looks like a PlaybackState
-          if (isPlaybackState(data)) {
-            console.log("PlaybackState received:", data);
-
-            // Use Spotify API to update playback
-            try {
-              const accessToken = localStorage.getItem("access_token"); // adjust to your token storage
-              if (!accessToken) {
-                console.warn("No Spotify access token available");
-                return;
-              }
-
-              fetch("https://api.spotify.com/v1/me/player/play", {
-                method: "PUT",
-                headers: {
-                  "Authorization": `Bearer ${accessToken}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  uris: [data.track_uri],
-                  position_ms: data.position_ms,
-                }),
-              });
-
-              console.log("Updated Spotify playback to match state.");
-            } catch (err) {
-              console.error("Error syncing Spotify playback:", err);
-            }
-          }
-          
-          const messageId = generateMessageId();
-          const currentMessageCount = messagesRef.current.length;
-          const messageIndex = currentMessageCount;
-          
-          // Check if the message contains audio data (byte array)
-          const isAudioData = data.array && Array.isArray(data.array) && data.array.length > 1000;
-          let audioUrl = null;
-          
-          if (isAudioData) {
-            // Convert byte array to audio blob
-            const uint8Array = new Uint8Array(data.array);
-            const audioBlob = new Blob([uint8Array], { type: 'audio/webm' });
-            audioUrl = URL.createObjectURL(audioBlob);
-            
-            // Automatically add to streaming queue
-            addToStreamQueue(audioUrl, messageIndex);
-          }
-          
-          const newMessage = {
-            id: messageId,
-            timestamp: new Date().toLocaleString(),
-            data: data,
-            type: 'received',
-            isAudio: isAudioData,
-            audioUrl: audioUrl,
-            userId: data.user_id || 'Unknown',
-            isCurrentlyPlaying: false
-          };
-          
-          console.log('Adding new message:', newMessage);
-          addMessage(newMessage);
-          
-        } catch (e) {
-          console.log('Non-JSON message received:', event.data);
-          // Handle non-JSON messages
-          const messageId = generateMessageId();
-          const newMessage = {
-            id: messageId,
-            timestamp: new Date().toLocaleString(),
-            data: event.data,
-            type: 'received',
-            isAudio: false,
-            userId: 'Unknown',
-            isCurrentlyPlaying: false
-          };
-          
-          addMessage(newMessage);
-        }
-      };
-
-      wsRef.current.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setError('WebSocket connection error');
-        setConnectionStatus('error');
-      };
-
-      wsRef.current.onclose = (event) => {
-        console.log('WebSocket closed:', event.code, event.reason);
-        setIsConnected(false);
-        setConnectionStatus('disconnected');
-        
-        // Attempt to reconnect after 3 seconds if not manually disconnected
-        if (event.code !== 1000 && event.code !== 1001) {
-          console.log('Attempting to reconnect in 3 seconds...');
-          reconnectTimeoutRef.current = setTimeout(() => {
-            if (wsUrl) {
-              connectWebSocket(wsUrl);
-            }
-          }, 3000);
-        }
-      };
-
-    } catch (err) {
-      console.error('Failed to create WebSocket connection:', err);
-      setError(`Failed to connect to WebSocket: ${err.message}`);
-      setConnectionStatus('error');
     }
+    // Clean up all queued blobs
+    streamQueueRef.current.forEach(({ audioUrl }) => {
+      URL.revokeObjectURL(audioUrl);
+    });
+    streamQueueRef.current = [];
   };
 
-  // Check browser support
-  const checkAudioSupport = () => {
-    const isSecureContext = window.isSecureContext || location.protocol === 'https:';
-    const hasGetDisplayMedia = navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia;
-    const hasGetUserMedia = navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
-    
-    return {
-      isSecureContext,
-      hasGetDisplayMedia,
-      hasGetUserMedia,
-      tabAudioSupported: isSecureContext && hasGetDisplayMedia,
-      microphoneSupported: hasGetUserMedia
-    };
+  // Audio capture stubs
+  const startAudioCapture = () => {
+    setIsCapturing(true);
+    setAudioLevel(0);
   };
-
-  // Start audio capture
-  const startAudioCapture = async () => {
-    const support = checkAudioSupport();
-    
-    try {
-      let stream;
-      
-      if (captureMode === 'tab') {
-        if (!support.tabAudioSupported) {
-          throw new Error(
-            !support.isSecureContext 
-              ? 'Tab audio capture requires HTTPS. Try using https://localhost or deploy to a secure server.'
-              : 'Tab audio capture is not supported in this browser. Try Chrome/Edge 74+ or Firefox 66+.'
-          );
-        }
-        
-        try {
-          stream = await navigator.mediaDevices.getDisplayMedia({
-            video: true,
-            audio: {
-              echoCancellation: false,
-              noiseSuppression: false,
-              autoGainControl: false,
-              sampleRate: 44100
-            }
-          });
-          
-          const audioTracks = stream.getAudioTracks();
-          if (audioTracks.length === 0) {
-            throw new Error('No audio track found. Make sure to check "Share tab audio" in the browser dialog.');
-          }
-          
-          const videoTracks = stream.getVideoTracks();
-          videoTracks.forEach(track => track.stop());
-          
-        } catch (displayError) {
-          try {
-            stream = await navigator.mediaDevices.getDisplayMedia({
-              video: false,
-              audio: {
-                echoCancellation: false,
-                noiseSuppression: false,
-                autoGainControl: false,
-                sampleRate: 44100
-              }
-            });
-          } catch (audioOnlyError) {
-            throw new Error(`Tab audio capture failed: ${displayError.message}. Try selecting "Share tab audio" in the dialog, or switch to microphone mode.`);
-          }
-        }
-        
-      } else {
-        if (!support.microphoneSupported) {
-          throw new Error('Microphone access is not supported in this browser.');
-        }
-        
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            sampleRate: 44100
-          }
-        });
-      }
-
-      streamRef.current = stream;
-
-      audioContextRef.current = new AudioContext();
-      const source = audioContextRef.current.createMediaStreamSource(stream);
-      analyserRef.current = audioContextRef.current.createAnalyser();
-      analyserRef.current.fftSize = 256;
-      source.connect(analyserRef.current);
-
-      monitorAudioLevel();
-
-      mediaRecorderRef.current = new MediaRecorder(stream, {
-        mimeType: 'audio/webm;codecs=opus'
-      });
-
-      audioChunksRef.current = [];
-
-      mediaRecorderRef.current.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorderRef.current.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        await sendAudioData(audioBlob);
-        audioChunksRef.current = [];
-      };
-
-      mediaRecorderRef.current.start();
-      setIsCapturing(true);
-
-      const interval = setInterval(() => {
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-          mediaRecorderRef.current.stop();
-          setTimeout(() => {
-            if (streamRef.current && streamRef.current.active) {
-              mediaRecorderRef.current.start();
-            }
-          }, 100);
-        }
-      }, AUDIO_CHUNK_SIZE);
-
-      streamRef.current.intervalId = interval;
-
-    } catch (err) {
-      setError(`Failed to start audio capture: ${err.message}`);
-      console.error('Audio capture error:', err);
-    }
-  };
-
-  // Stop audio capture
+  
   const stopAudioCapture = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.stop();
-    }
-
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      if (streamRef.current.intervalId) {
-        clearInterval(streamRef.current.intervalId);
-      }
-    }
-
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-    }
-
     setIsCapturing(false);
     setAudioLevel(0);
   };
 
-  // Monitor audio levels for visual feedback
-  const monitorAudioLevel = () => {
-    if (!analyserRef.current) return;
-
-    const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
-    
-    const updateLevel = () => {
-      if (!analyserRef.current || !isCapturing) return;
-      
-      analyserRef.current.getByteFrequencyData(dataArray);
-      const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length;
-      setAudioLevel(average);
-      
-      requestAnimationFrame(updateLevel);
-    };
-    
-    updateLevel();
-  };
-
-  // Send audio data to server
-  const sendAudioData = async (audioBlob) => {
-    try {
-      const arrayBuffer = await audioBlob.arrayBuffer();
-      const audioArray = Array.from(new Uint8Array(arrayBuffer));
-
-      const broadcastData = {
-        user_id: userId,
-        topic: topic,
-        timestamp: Date.now(),
-        array: audioArray
-      };
-
-      console.log('Sending audio data:', broadcastData);
-
-      const response = await fetch(`${API_BASE_URL}/broadcast`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(broadcastData),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const messageId = generateMessageId();
-      const sentMessage = {
-        id: messageId,
-        timestamp: new Date().toLocaleString(),
-        data: `Audio chunk sent (${audioArray.length} bytes)`,
-        type: 'sent',
-        isAudio: false
-      };
-
-      addMessage(sentMessage);
-
-    } catch (err) {
-      console.error('Failed to send audio data:', err);
-      setError(`Failed to send audio data: ${err.message}`);
-    }
-  };
-  
-  // Send broadcast message
-  const sendBroadcast = async () => {
-    if (!messageInput.trim()) return;
-
-    try {
-      const messageBytes = Array.from(new TextEncoder().encode(messageInput));
-      
-      const broadcastData = {
-        user_id: userId,
-        topic: topic,
-        timestamp: Date.now(),
-        array: messageBytes
-      };
-
-      console.log('Sending broadcast message:', broadcastData);
-
-      const response = await fetch(`${API_BASE_URL}/broadcast`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(broadcastData),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const messageId = generateMessageId();
-      const sentMessage = {
-        id: messageId,
-        timestamp: new Date().toLocaleString(),
-        data: messageInput,
-        type: 'sent',
-        isAudio: false
-      };
-
-      addMessage(sentMessage);
-      setMessageInput('');
-      
-    } catch (err) {
-      console.error('Failed to send broadcast:', err);
-      setError(`Failed to send broadcast: ${err.message}`);
-    }
-  };
-
   // Disconnect WebSocket
   const disconnect = () => {
-    if (wsRef.current) {
-      wsRef.current.close(1000, 'User disconnected'); // Normal closure
-    }
-    
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    
-    // Stop audio stream and clean up
     stopAudioStream();
-    
-    // Clean up individual audio elements
-    Object.values(audioElementsRef.current).forEach(audio => {
-      if (audio?.src) {
-        URL.revokeObjectURL(audio.src);
-      }
-    });
-    audioElementsRef.current = {};
-    
-    setIsConnected(false);
     setMessages([]);
-    setConnectionStatus('disconnected');
     setError('');
   };
 
-  const getStatusColor = () => {
-    switch (connectionStatus) {
-      case 'connected': return 'text-green-600';
-      case 'connecting': return 'text-yellow-600';
-      case 'error': return 'text-red-600';
-      default: return 'text-gray-600';
-    }
-  };
-
-  const getServerConnectionHealth = async () => {
+  // Handle incoming WebSocket messages
+  const handleWsMessage = useCallback((event) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/health`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
+      const data = JSON.parse(event.data);
+      
+      // Handle playback sync updates
+      if (data.action === 'UpdatePlayback') {
+        setSyncedPlaybackState({
+          track_uri: data.track_uri,
+          position_ms: data.position_ms,
+          queue: data.queue || [],
+          timestamp: data.timestamp || Date.now()
+        });
+        return;
+      }
 
-      setServerHealth(response.ok);
-    } catch (error) {
-      console.error('Health check failed:', error);
-      setServerHealth(false);
+      // Handle audio chunks
+      const isAudio = !!(data.array && Array.isArray(data.array));
+      let audioUrl = null;
+      
+      if (isAudio) {
+        const uint8Array = new Uint8Array(data.array);
+        const audioBlob = new Blob([uint8Array], { type: 'audio/webm' });
+        audioUrl = URL.createObjectURL(audioBlob);
+        streamQueueRef.current.push({ audioUrl, index: messagesRef.current.length });
+        
+        // Start playback if not already playing
+        if (!isStreamPlaying && streamQueueRef.current.length === 1) {
+          playNextChunk();
+        }
+        data.audioUrl = audioUrl;
+      }
+      
+      setMessages(prev => [...prev, {
+        id: `msg_${Date.now()}`,
+        timestamp: new Date().toLocaleString(),
+        data,
+        type: 'received',
+        isAudio,
+        userId: data.user_id || 'Unknown',
+      }]);
+    } catch {
+      setMessages(prev => [...prev, {
+        id: `msg_${Date.now()}`,
+        timestamp: new Date().toLocaleString(),
+        data: event.data,
+        type: 'received',
+        isAudio: false,
+        userId: 'Unknown',
+      }]);
     }
+  }, [isStreamPlaying, playNextChunk]);
+
+  // Listen to WebSocket messages from context
+  useEffect(() => {
+    if (lastMessage) {
+      handleWsMessage(lastMessage);
+    }
+  }, [lastMessage, handleWsMessage]);
+
+  // Send broadcast message
+  const sendBroadcast = () => {
+    if (!messageInput.trim()) return;
+    sendMessage({
+      action: 'Broadcast',
+      user_id: userId,
+      topic,
+      timestamp: Date.now(),
+      array: Array.from(new TextEncoder().encode(messageInput)),
+    });
+    setMessages(prev => [...prev, {
+      id: `msg_${Date.now()}`,
+      timestamp: new Date().toLocaleString(),
+      data: messageInput,
+      type: 'sent',
+      isAudio: false,
+      userId,
+    }]);
+    setMessageInput('');
   };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        if (audioRef.current.src) {
+          URL.revokeObjectURL(audioRef.current.src);
+        }
+        audioRef.current = null;
+      }
+      streamQueueRef.current.forEach(({ audioUrl }) => {
+        URL.revokeObjectURL(audioUrl);
+      });
+      streamQueueRef.current = [];
+      messagesRef.current.forEach(msg => {
+        if (msg.isAudio && msg.data?.audioUrl) {
+          URL.revokeObjectURL(msg.data.audioUrl);
+        }
+      });
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-gray-50 p-4">
@@ -679,9 +301,13 @@ export default function Room() {
             </button>
             
             <div className="flex items-center gap-4">
-              <div className={`flex items-center gap-2 px-3 py-2 rounded-full ${getStatusColor()}`}>
+              <div className={`flex items-center gap-2 px-3 py-2 rounded-full ${
+                connectionStatus === 'connected' ? 'text-green-600' :
+                connectionStatus === 'connecting' ? 'text-yellow-600' :
+                connectionStatus === 'error' ? 'text-red-600' : 'text-gray-600'
+              }`}>
                 <div className={`w-2 h-2 rounded-full ${
-                  connectionStatus === 'connected' ? 'bg-green-500' : 
+                  connectionStatus === 'connected' ? 'bg-green-500' :
                   connectionStatus === 'connecting' ? 'bg-yellow-500 animate-pulse' :
                   connectionStatus === 'error' ? 'bg-red-500' : 'bg-gray-400'
                 }`}></div>
@@ -713,9 +339,53 @@ export default function Room() {
           )}
 
           {/* Music Player Section */}
-          {
-            <MusicPlayer/>
-          }
+          <MusicPlayer />
+
+          {/* Playback Sync Status */}
+          {isHost && (
+            <div className="mb-6 p-4 bg-purple-50 rounded-lg">
+              <h3 className="text-lg font-semibold mb-2">Host Playback Sync</h3>
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-gray-600">
+                  Status: <span className="font-medium text-purple-600">
+                    {lastUpdate ? `Syncing (last: ${new Date(lastUpdate).toLocaleTimeString()})` : 'Initializing...'}
+                  </span>
+                </p>
+                <button
+                  onClick={sendManualHeartbeat}
+                  disabled={!isConnected}
+                  className={`px-4 py-2 rounded-md font-medium transition-colors ${
+                    isConnected 
+                      ? 'bg-purple-500 text-white hover:bg-purple-600' 
+                      : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  }`}
+                >
+                  📡 Send Heartbeat Now
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 mt-2">
+                💡 Automatic sync runs every 5 seconds. Use the manual button to sync immediately.
+              </p>
+            </div>
+          )}
+
+          {/* Synced Playback State (for non-hosts) */}
+          {!isHost && syncedPlaybackState && (
+            <div className="mb-6 p-4 bg-blue-50 rounded-lg">
+              <h3 className="text-lg font-semibold mb-2">Synced Playback</h3>
+              <p className="text-sm text-gray-600">
+                Track: <span className="font-medium">{syncedPlaybackState.track_uri}</span>
+              </p>
+              <p className="text-sm text-gray-600">
+                Position: <span className="font-medium">{Math.floor(syncedPlaybackState.position_ms / 1000)}s</span>
+              </p>
+              {syncedPlaybackState.queue.length > 0 && (
+                <p className="text-sm text-gray-600">
+                  Queue: <span className="font-medium">{syncedPlaybackState.queue.length} tracks</span>
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Connection Info */}
           <div className="mb-6 p-4 bg-gray-50 rounded-lg">
@@ -723,10 +393,8 @@ export default function Room() {
             <p className="text-sm text-gray-600">
               Topic: <span className="font-medium">{topic}</span> | 
               User ID: <span className="font-medium">{userId}</span> | 
+              Role: <span className="font-medium">{isHost ? 'Host' : 'Guest'}</span> |
               Messages: <span className="font-medium">{messages.length}</span>
-            </p>
-            <p className="text-sm text-gray-600">
-              WebSocket URL: <span className="font-mono text-xs">{wsUrl}</span>
             </p>
           </div>
           
@@ -782,7 +450,7 @@ export default function Room() {
               </div>
               
               <p className="text-xs text-gray-600">
-                🎵 Audio chunks are automatically played in sequence as they arrive, creating a continuous stream.
+                🎵 Audio chunks are automatically played in sequence as they arrive.
                 {currentlyPlayingIndex >= 0 && ` Currently playing chunk #${currentlyPlayingIndex + 1}.`}
               </p>
             </div>
@@ -821,7 +489,6 @@ export default function Room() {
                 )}
               </div>
 
-              {/* Audio Level Indicator */}
               {isCapturing && (
                 <div className="mb-4">
                   <div className="flex items-center gap-2 mb-2">
@@ -877,7 +544,7 @@ export default function Room() {
             <div className="p-4">
               <h3 className="text-lg font-semibold mb-4">Messages & Audio Chunks</h3>
               {messages.length === 0 ? (
-                <p className="text-gray-500 text-center py-8">No messages yet. Connect to a topic to start!</p>
+                <p className="text-gray-500 text-center py-8">No messages yet. Connect to start!</p>
               ) : (
                 <div className="space-y-3">
                   {messages.map((message, index) => (
@@ -919,7 +586,7 @@ export default function Room() {
                           <div className="flex items-center gap-3">
                             <span>Audio stream chunk ({message.data.array?.length || 0} bytes)</span>
                             <span className="text-xs text-gray-500">
-                              {currentlyPlayingIndex === index ? '🔊 Playing in stream' : '⏳ Queued for stream'}
+                              {currentlyPlayingIndex === index ? '🔊 Playing' : '⏳ Queued'}
                             </span>
                           </div>
                         ) : (
@@ -935,5 +602,20 @@ export default function Room() {
         </div>
       </div>
     </div>
+  );
+}
+
+// Outer component with WebSocketProvider
+export default function Room() {
+  const location = useLocation();
+  const [wsUrl] = useState(location.state?.wsUrl || '');
+  const [userId] = useState(location.state?.id || "");
+
+  console.log("Room component props:", { wsUrl, userId, locationState: location.state });
+
+  return (
+    <WebSocketProvider wsUrl={wsUrl} userId={userId}>
+      <RoomContent />
+    </WebSocketProvider>
   );
 }

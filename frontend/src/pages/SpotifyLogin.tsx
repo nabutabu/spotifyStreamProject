@@ -3,7 +3,7 @@ import { useParams, useLocation, useNavigate } from 'react-router-dom';
 import { Music, Headphones, Play } from 'lucide-react';
 
 var client_id = '33761d48be7b443485a146820010cfc7';
-var redirect_uri = 'https://127.0.0.1/api/callback';
+var redirect_uri = 'https://192.168.1.123/api/callback';
 
 export default function SpotifyLogin() {
     const [isLoading, setIsLoading] = useState(false);
@@ -15,7 +15,7 @@ export default function SpotifyLogin() {
     const loginToSpotify = useCallback(() => {
         setIsLoading(true);
         setError('');
-        
+
         const scope = [
             'user-read-private',
             'user-read-email',

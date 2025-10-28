@@ -37,21 +37,21 @@ pub struct PlaybackState {
 
 /// Represents a synchronized playback room where multiple clients can listen together.
 ///
-/// A `Room` tracks which clients are currently joined, which client is the host, 
+/// A `Room` tracks which clients are currently joined, which client is the host,
 /// and the current playback state if one is set. Each room is uniquely identified
 /// by its `id`.
 ///
 /// # Examples
 /// ```
 /// use std::collections::HashSet;
-/// 
+///
 /// let mut room = Room {
 ///     id: "room_123".to_string(),
 ///     host_client_id: Some("host_abc".to_string()),
 ///     clients: HashSet::new(),
 ///     playback_state: None,
 /// };
-/// 
+///
 /// room.clients.insert("client_xyz".to_string());
 /// assert!(room.clients.contains("client_xyz"));
 /// ```
@@ -93,7 +93,7 @@ impl RoomRepository {
 
     pub async fn create_room(&self, room_id: &str, host_client_id: &str) -> RedisResult<Room> {
         let mut conn = self.get_connection().await?;
-        
+
         let mut clients = HashSet::new();
         clients.insert(host_client_id.to_string());
 
@@ -130,18 +130,18 @@ impl RoomRepository {
             .ok_or_else(|| RedisError::from((redis::ErrorKind::TypeError, "Room not found")))?;
 
         room.playback_state = Some(playback_state.clone());
-        
+
         let room_json = serde_json::to_string(&room)
             .map_err(|_e| RedisError::from((redis::ErrorKind::TypeError, "Serialization error")))?;
 
         let mut conn = self.get_connection().await?;
         let _: () = conn.set(&self.room_key(room_id), room_json).await?;
-        
+
         // Publish update to Redis pub/sub
         let update_json = serde_json::to_string(&playback_state)
             .map_err(|_e| RedisError::from((redis::ErrorKind::TypeError, "Serialization error")))?;
         let _: () = conn.publish(&self.room_updates_key(room_id), update_json).await?;
-        
+
         Ok(())
     }
 
@@ -151,7 +151,7 @@ impl RoomRepository {
             .ok_or_else(|| RedisError::from((redis::ErrorKind::TypeError, "Room not found")))?;
 
         room.clients.insert(client_id.to_string());
-        
+
         let room_json = serde_json::to_string(&room)
             .map_err(|_e| RedisError::from((redis::ErrorKind::TypeError, "Serialization error")))?;
 
@@ -166,7 +166,7 @@ impl RoomRepository {
             .ok_or_else(|| RedisError::from((redis::ErrorKind::TypeError, "Room not found")))?;
 
         room.clients.remove(client_id);
-        
+
         let room_json = serde_json::to_string(&room)
             .map_err(|_e| RedisError::from((redis::ErrorKind::TypeError, "Serialization error")))?;
 
@@ -185,12 +185,12 @@ impl RoomRepository {
 #[derive(Debug)]
 pub struct RoomTask {
     /// Handle to the running background task (e.g. spawned with `tokio::spawn`).
-    /// 
+    ///
     /// You can use this to cancel or await the task when cleaning up.
     pub task_handle: JoinHandle<()>,
 
     /// The set of client IDs that are currently part of this task’s room.
-    /// 
+    ///
     /// Stored inside an `Arc<RwLock<_>>` so multiple async tasks can read/write
     /// the set safely (e.g. adding/removing clients as they join/leave).
     pub clients: Arc<RwLock<HashSet<String>>>,
@@ -203,22 +203,41 @@ pub struct ClientConnection {
     pub sender: mpsc::UnboundedSender<Result<Message, warp::Error>>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MediaIncomingRequest {
+    user_id: String,
+    topic: Option<String>,
+    timestamp: u64,
+    array: Vec<u8>
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MediaOutgoingRequest {
+    user_id: String,
+    timestamp: u64,
+    array: Vec<u8>
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WebSocketMessage {
-    PlaybackUpdate { 
-        room_id: String, 
-        playback_state: PlaybackState 
+    PlaybackUpdate {
+        room_id: String,
+        playback_state: PlaybackState
     },
-    RoomJoined { 
-        room_id: String 
+    RoomJoined {
+        room_id: String
     },
-    RoomLeft { 
-        room_id: String 
+    RoomLeft {
+        room_id: String
     },
     Error {
         message: String
     },
+    Ping,
+    Pong,
+    MediaOutgoingRequest(MediaOutgoingRequest),
+    MediaIncomingRequest(MediaIncomingRequest),
 }
 
 /// Manages the lifecycle of active rooms, their tasks, and client connections.
@@ -246,7 +265,7 @@ impl RoomManager {
     pub fn new(redis_url: &str) -> RedisResult<Self> {
         let repository = Arc::new(RoomRepository::new(redis_url)?);
         let redis_client = redis::Client::open(redis_url)?;
-        
+
         Ok(Self {
             repository,
             room_tasks: Arc::new(RwLock::new(HashMap::new())),
@@ -261,14 +280,14 @@ impl RoomManager {
 
     // Register a WebSocket client (Warp style)
     pub async fn register_client(
-        &self, 
-        client_id: String, 
+        &self,
+        client_id: String,
         sender: mpsc::UnboundedSender<Result<Message, warp::Error>>
     ) {
-        let connection = ClientConnection { 
-            client_id: client_id.clone(), 
+        let connection = ClientConnection {
+            client_id: client_id.clone(),
             room_id: None,
-            sender 
+            sender
         };
         self.client_connections.write().await.insert(client_id, connection);
     }
@@ -291,7 +310,7 @@ impl RoomManager {
     ) -> RedisResult<JoinHandle<()>> {
         let pubsub_conn = self.redis_client.get_async_connection().await
             .map_err(|_e| RedisError::from((redis::ErrorKind::IoError, "Failed to get async connection")))?;
-        
+
         let room_updates_channel = format!("room:{}:updates", room_id);
         let room_id_clone = room_id.clone();
         let client_connections = self.client_connections.clone();
@@ -299,7 +318,7 @@ impl RoomManager {
         let task = tokio::spawn(async move {
             // Subscribe to the room's updates channel
             let mut pubsub = pubsub_conn.into_pubsub();
-            
+
             if let Err(e) = pubsub.subscribe(&room_updates_channel).await {
                 eprintln!("Failed to subscribe to {}: {}", room_updates_channel, e);
                 return;
@@ -320,14 +339,14 @@ impl RoomManager {
 
                         // Get current room clients
                         let current_clients = room_clients.read().await.clone();
-                        
+
                         // Send to all clients in this room
                         let connections = client_connections.read().await;
                         for client_id in current_clients {
                             if let Some(client) = connections.get(&client_id) {
                                 let message_json = serde_json::to_string(&ws_message).unwrap_or_default();
                                 let warp_message = Message::text(message_json);
-                                
+
                                 if let Err(_) = client.sender.send(Ok(warp_message)) {
                                     eprintln!("Failed to send message to client: {}", client_id);
                                 }
@@ -354,7 +373,7 @@ impl RoomManager {
 
         // Start the Redis pub/sub monitoring task
         let task_handle = self.start_room_monitoring_task(
-            room_id.to_string(), 
+            room_id.to_string(),
             room_clients.clone()
         ).await?;
 
@@ -363,7 +382,7 @@ impl RoomManager {
             task_handle,
             clients: room_clients,
         };
-        
+
         self.room_tasks.write().await.insert(room_id.to_string(), room_task);
 
         // Update client's room association
@@ -387,7 +406,7 @@ impl RoomManager {
         // Update client's room association
         if let Some(mut client) = self.client_connections.write().await.get_mut(client_id) {
             client.room_id = Some(room_id.to_string());
-            
+
             // Send join confirmation
             let join_message = WebSocketMessage::RoomJoined {
                 room_id: room_id.to_string(),
@@ -412,7 +431,7 @@ impl RoomManager {
         // Update client's room association
         if let Some(mut client) = self.client_connections.write().await.get_mut(client_id) {
             client.room_id = None;
-            
+
             // Send leave confirmation
             let leave_message = WebSocketMessage::RoomLeft {
                 room_id: room_id.to_string(),
@@ -431,7 +450,7 @@ impl RoomManager {
             .ok_or_else(|| RedisError::from((redis::ErrorKind::TypeError, "Room not found")))?;
 
         room.clients.insert(client_id.to_string());
-        
+
         let room_json = serde_json::to_string(&room)
             .map_err(|_e| RedisError::from((redis::ErrorKind::TypeError, "Serialization error")))?;
 
@@ -446,7 +465,7 @@ impl RoomManager {
             .ok_or_else(|| RedisError::from((redis::ErrorKind::TypeError, "Room not found")))?;
 
         room.clients.remove(client_id);
-        
+
         let room_json = serde_json::to_string(&room)
             .map_err(|_e| RedisError::from((redis::ErrorKind::TypeError, "Serialization error")))?;
 
@@ -478,11 +497,11 @@ impl RoomManager {
         if let Some(room_task) = self.room_tasks.read().await.get(room_id) {
             let clients_in_room = room_task.clients.read().await.clone();
             let connections = self.client_connections.read().await;
-            
+
             let message_json = serde_json::to_string(&message)
                 .map_err(|e| format!("Serialization error: {}", e))?;
             let warp_message = Message::text(message_json);
-            
+
             for client_id in clients_in_room {
                 if let Some(client) = connections.get(&client_id) {
                     let _ = client.sender.send(Ok(warp_message.clone()));
@@ -498,7 +517,7 @@ impl RoomManager {
         // Stop the monitoring task
         if let Some(room_task) = self.room_tasks.write().await.remove(room_id) {
             room_task.task_handle.abort();
-            
+
             // Remove room association from all clients in the room
             let clients_in_room = room_task.clients.read().await.clone();
             let mut connections = self.client_connections.write().await;

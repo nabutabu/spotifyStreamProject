@@ -5,6 +5,8 @@ use serde_json::from_str;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::ws::{Message, WebSocket};
+use crate::repository::{RoomManager, WebSocketMessage};
+use serde_json::Value;
 
 #[derive(Deserialize, Debug)]
 pub struct TopicsRequest {
@@ -54,20 +56,61 @@ async fn client_msg(id: &str, msg: Message, clients: &Clients) {
         Err(_) => return,
     };
 
-    if message == "ping" || message == "ping\n" {
-        return;
-    }
+    handle_websocket_message(message).await;
+}
 
-    let topics_req: TopicsRequest = match from_str(&message) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("error while parsing message to topics request: {}", e);
-            return;
-        }
+/// Handles incoming WebSocket messages, dispatching based on message type.
+pub async fn handle_websocket_message(msg: &str) -> Option<WebSocketMessage> {
+    println!("handle_websocket_message: {}", msg);
+    // Parse the incoming message as JSON
+    let parsed: Value = match serde_json::from_str(msg) {
+        Ok(val) => val,
+        Err(_) => return None,
     };
 
-    let mut locked = clients.write().await;
-    if let Some(v) = locked.get_mut(id) {
-        v.topics = topics_req.topics;
+    // Extract the "type" field to determine the message kind
+    let msg_type = parsed.get("type")?.as_str()?;
+
+    match msg_type {
+        "PING" => {
+            // Handle PING message
+            Some(WebSocketMessage::Pong)
+        }
+        "MEDIA_INCOMING" => {
+            // Handle Media Incoming message
+            println!("MEDIA_INCOMING received");
+            Some(WebSocketMessage::Ping)
+        }
+        "MEDIA_OUTGOING" => {
+            // Handle Media Outgoing message
+            println!("MEDIA_OUTGOING received");
+            Some(WebSocketMessage::Ping)
+        },
+        "UPDATE_PLAYBACK" => {
+            // Handle Update Playback message
+            println!("UPDATE_PLAYBACK received");
+            Some(WebSocketMessage::Ping)
+        },
+        "TOPIC_REQUEST" => {
+            // Handle Topic Request message
+            let topics_req: TopicsRequest = match from_str(&msg) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("error while parsing message to topics request: {}", e);
+                    return None;
+                }
+            };
+
+            println!("TOPIC_REQUEST received: {:?}", topics_req);
+            Some(WebSocketMessage::Ping)
+        },
+
+
+
+        // Add more message types as needed
+        _ => {
+            // Unknown message type
+            None
+        }
     }
 }
