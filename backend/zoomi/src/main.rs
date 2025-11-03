@@ -76,7 +76,7 @@ async fn main() {
         .and(with_room_manager(room_manager.clone()))
         .and_then(handler::publish_handler);
 
-    let ws_route = warp::path!("ws" / String)
+    let ws_route = warp::path!("ws" / String / String)
         .and(warp::ws())
         .and(with_clients(clients.clone()))
         .and(with_room_manager(room_manager.clone()))
@@ -88,7 +88,7 @@ async fn main() {
         .and(warp::body::json::<TopicActionRequest>())
         .and(warp::any().map(move || clients_for_add.clone()))
         .and_then(add_topic);
-    
+
     let clients_for_remove = clients.clone();
     let remove_topic_route = warp::delete()
         .and(warp::path("remove_topic"))
@@ -106,7 +106,7 @@ async fn main() {
         .and(warp::get())
         .and(warp::query::<handler::AuthCodeQuery>())
         .and_then(handler::callback);
-    
+
     // SPOTIFY ROUTES
     let get_user_profile = warp::path("get_user_profile")
         .and(warp::get())
@@ -117,11 +117,17 @@ async fn main() {
         .and(warp::get())
         .and(warp::header::headers_cloned())
         .and_then(handler::current_song);
-    
+
     let get_queue_route = warp::path("get_queue")
         .and(warp::get())
         .and(warp::header::headers_cloned())
         .and_then(handler::get_queue);
+
+    let start_playback_route = warp::path("start_playback")
+        .and(warp::body::json::<PlaybackState>())
+        .and(warp::post())
+        .and(warp::header::headers_cloned())
+        .and_then(handler::start_playback);
 
     let routes = health_route
         .or(register_routes)

@@ -126,6 +126,7 @@ impl RoomRepository {
     }
 
     pub async fn update_playback_state(&self, room_id: &str, playback_state: PlaybackState) -> RedisResult<()> {
+        println!("Updating playback state for room: {}", room_id);
         let mut room = self.get_room(room_id).await?
             .ok_or_else(|| RedisError::from((redis::ErrorKind::TypeError, "Room not found")))?;
 
@@ -282,11 +283,13 @@ impl RoomManager {
     pub async fn register_client(
         &self,
         client_id: String,
+        room_id: String,
         sender: mpsc::UnboundedSender<Result<Message, warp::Error>>
     ) {
+        println!("Registering client: {} to room: {}", client_id, room_id);
         let connection = ClientConnection {
             client_id: client_id.clone(),
-            room_id: None,
+            room_id: Some(room_id),
             sender
         };
         self.client_connections.write().await.insert(client_id, connection);
@@ -326,9 +329,10 @@ impl RoomManager {
 
             println!("Started monitoring room: {}", room_id_clone);
 
-            // Listen for messages
+            // Listen for messages from the redis channel
             let mut stream = pubsub.on_message();
             while let Some(msg) = stream.next().await {
+                println!("Received message for room {}: {:?}", room_id_clone, msg);
                 if let Ok(payload) = msg.get_payload::<String>() {
                     // Parse the playback state update
                     if let Ok(playback_state) = serde_json::from_str::<PlaybackState>(&payload) {

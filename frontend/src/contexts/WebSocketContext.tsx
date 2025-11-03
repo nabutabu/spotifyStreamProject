@@ -21,12 +21,16 @@ export const useWebSocket = () => useContext(WebSocketContext);
 interface WebSocketProviderProps {
   wsUrl: string;
   userId: string;
+  isHost?: boolean;
   children: React.ReactNode;
 }
+
+const API_BASE_URL = 'https://192.168.1.123:443/api';
 
 export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
   wsUrl,
   userId,
+  isHost = false,
   children
 }) => {
   const wsRef = useRef<WebSocket | null>(null);
@@ -34,6 +38,38 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [lastMessage, setLastMessage] = useState<MessageEvent | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Function to call backend start_playback endpoint
+  const startPlayback = async (playbackState: any) => {
+    try {
+      console.log('Calling start_playback with:', playbackState);
+
+      const response = await fetch(`${API_BASE_URL}/start_playback`, {
+        method: 'POST',
+        credentials: 'include', // Send HttpOnly cookies
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          track_uri: playbackState.track_uri,
+          position_ms: playbackState.position_ms,
+          queue: playbackState.queue || [],
+          timestamp: playbackState.timestamp
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Failed to start playback:', response.status, errorText);
+        return;
+      }
+
+      const result = await response.json();
+      console.log('Start playback response:', result);
+    } catch (error) {
+      console.error('Error calling start_playback:', error);
+    }
+  };
 
   const connectWebSocket = useCallback(() => {
     if (!wsUrl) return;
@@ -61,9 +97,39 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
         }
       };
 
-      wsRef.current.onmessage = (event) => {
+      wsRef.current.onmessage = async (event) => {
         console.log('WebSocket message received:', event.data);
-        // Expose message through context instead of callback
+
+        // Try to parse and check for PlaybackUpdate
+        try {
+          const data = JSON.parse(event.data);
+
+          // Check for different possible message structures from backend
+          // Structure 1: { type: 'PlaybackUpdate', playback_state: {...} }
+          if (data.type === 'PlaybackUpdate' && data.playback_state && !isHost) {
+            console.log('PlaybackUpdate (type) detected for guest, calling start_playback...');
+            await startPlayback(data.playback_state);
+          }
+          // Structure 2: { action: 'UPDATE_PLAYBACK', playback_update: { playback_state: {...} } }
+          else if (data.action === 'UPDATE_PLAYBACK' && data.playback_update?.playback_state && !isHost) {
+            console.log('PlaybackUpdate (action) detected for guest, calling start_playback...');
+            await startPlayback(data.playback_update.playback_state);
+          }
+          // Structure 3: Direct playback state with action field
+          else if (data.action === 'UpdatePlayback' && !isHost) {
+            console.log('UpdatePlayback action detected for guest, calling start_playback...');
+            await startPlayback({
+              track_uri: data.track_uri,
+              position_ms: data.position_ms,
+              queue: data.queue || [],
+              timestamp: data.timestamp || Date.now()
+            });
+          }
+        } catch (parseError) {
+          console.log('Could not parse message as JSON or no playback update, treating as raw data');
+        }
+
+        // Always expose message through context for other handlers
         setLastMessage(event);
       };
 
@@ -90,7 +156,7 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
       console.error('Failed to create WebSocket connection:', err);
       setConnectionStatus('error');
     }
-  }, [wsUrl]);
+  }, [wsUrl, isHost]);
 
   useEffect(() => {
     if (wsUrl) {

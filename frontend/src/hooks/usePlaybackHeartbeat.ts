@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useWebSocket } from '../contexts/WebSocketContext';
 
 interface PlaybackState {
@@ -13,19 +13,25 @@ const API_BASE_URL = 'https://192.168.1.123:443/api';
 export const usePlaybackHeartbeat = (
   isHost: boolean,
   roomId: string,
-  intervalMs: number = 5000
+  intervalMs: number = 10000,
+  onStateUpdate?: (state: PlaybackState) => void
 ) => {
   const { sendMessage, isConnected } = useWebSocket();
   const [lastUpdate, setLastUpdate] = useState<number | null>(null);
   const [error, setError] = useState<string>('');
   const heartbeatRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Store the callback in a ref to avoid recreating the effect
+  const onStateUpdateRef = useRef(onStateUpdate);
+  useEffect(() => {
+    onStateUpdateRef.current = onStateUpdate;
+  }, [onStateUpdate]);
+
   const fetchPlaybackState = async (): Promise<PlaybackState | null> => {
     try {
-      // Call your backend endpoint that reads the HttpOnly cookie
       const response = await fetch(`${API_BASE_URL}/current_song`, {
         method: 'GET',
-        credentials: 'include', // CRITICAL: This sends the HttpOnly cookie
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json'
         }
@@ -40,19 +46,17 @@ export const usePlaybackHeartbeat = (
       }
 
       const data = await response.json();
-      
-      // Check if Spotify returned empty response (no active playback)
+
       if (!data || !data.item) {
         console.log('No active playback on Spotify');
         return null;
       }
 
-      // Fetch queue through backend as well
       let queue: string[] = [];
       try {
         const queueResponse = await fetch(`${API_BASE_URL}/get_queue`, {
           method: 'GET',
-          credentials: 'include', // Send cookie
+          credentials: 'include',
           headers: {
             'Content-Type': 'application/json'
           }
@@ -88,14 +92,23 @@ export const usePlaybackHeartbeat = (
       try {
         const currentState = await fetchPlaybackState();
         if (currentState) {
-          // Send through WebSocket
+          // Update local state via callback (for host UI)
+          if (onStateUpdateRef.current) {
+            onStateUpdateRef.current(currentState);
+          }
+
+          // Send through WebSocket with proper structure for Rust backend
           sendMessage({
-            action: 'UpdatePlayback',
-            room_id: roomId,
-            track_uri: currentState.track_uri,
-            position_ms: currentState.position_ms,
-            queue: currentState.queue,
-            timestamp: currentState.timestamp
+            action: 'UPDATE_PLAYBACK',
+            playback_update: {
+              room_id: roomId,
+              playback_state: {
+                track_uri: currentState.track_uri,
+                position_ms: currentState.position_ms,
+                queue: currentState.queue,
+                timestamp: currentState.timestamp
+              }
+            }
           });
 
           setLastUpdate(Date.now());
@@ -118,7 +131,7 @@ export const usePlaybackHeartbeat = (
         clearInterval(heartbeatRef.current);
       }
     };
-  }, [isHost, isConnected, roomId, intervalMs, sendMessage]);
+  }, [isHost, isConnected, roomId, intervalMs, sendMessage]); // Removed onStateUpdate
 
   return { lastUpdate, error };
 };

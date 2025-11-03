@@ -265,16 +265,15 @@ pub async fn register_handler(body: RegisterRequest, clients: Clients, room_mana
     }
 
     let new_client = register_client(
-        new_room_id.clone(),
-        user_id.clone().expect("Reason"),
         body.topic.clone(),
+        user_id.clone().expect("Reason"),
         clients.clone()
     ).await;
 
     // get room and check if user exists in this room
     let room = room_manager.get_room(&new_room_id).await
     .map_err(|_| warp::reject::custom(HttpError))?;
-    
+
     if let Some(existing_room) = room {
         if existing_room.clients.contains(&user_id.clone().expect("REASON")) {
 
@@ -300,7 +299,7 @@ pub async fn register_handler(body: RegisterRequest, clients: Clients, room_mana
             };
 
             return Ok(json(&RegisterResponse {
-                url: format!("wss://192.168.1.123/ws/{}", new_room_id.clone()),
+                url: format!("wss://192.168.1.123/ws/{}/{}", body.topic.clone(), user_id.clone().expect("REASON")),
                 spotify_id: user_id.clone().expect("REASON"),
                 isHost: false,
             }));
@@ -308,7 +307,7 @@ pub async fn register_handler(body: RegisterRequest, clients: Clients, room_mana
     }
 
 
-    let room = match room_manager.create_room(&new_room_id, &user_id.clone().expect("REASON")).await {
+    let room = match room_manager.create_room(&body.topic, &user_id.clone().expect("REASON")).await {
         Ok(room) => room,
         Err(e) => {
             let response = ApiResponse::<()> {
@@ -321,7 +320,7 @@ pub async fn register_handler(body: RegisterRequest, clients: Clients, room_mana
     };
 
     Ok(json(&RegisterResponse {
-        url: format!("wss://192.168.1.123/ws/{}", new_room_id.clone()),
+        url: format!("wss://192.168.1.123/ws/{}/{}", body.topic.clone(), user_id.clone().expect("REASON")),
         spotify_id: user_id.clone().expect("REASON"),
         isHost: true,
     }))
@@ -337,10 +336,10 @@ pub async fn register_handler(body: RegisterRequest, clients: Clients, room_mana
 * * `topic` - The topic the client is interested in.
 * * `clients` - A shared map of clients, protected by a read-write lock.
 */
-async fn register_client(room_id: String, user_id: String, topic: String, clients: Clients) -> Client {
+async fn register_client(room_id: String, user_id: String, clients: Clients) -> Client {
     let new_client = Client {
         user_id: user_id.clone(),
-        topics: vec![topic],
+        topics: vec![room_id.clone()],
         sender: None,
     };
     clients.write().await.insert(
@@ -357,12 +356,12 @@ pub async fn unregister_handler(id: String, clients: Clients) -> Result<impl Rep
     Ok(StatusCode::OK)
 }
 
-pub async fn ws_handler(id: String, ws: warp::ws::Ws, clients: Clients, room_manager: Arc<RoomManager>) -> Result<impl Reply> {
-    println!("ws_handler: {}", id);
-    let client = clients.read().await.get(&id).cloned();
+pub async fn ws_handler(room_id: String, user_id: String, ws: warp::ws::Ws, clients: Clients, room_manager: Arc<RoomManager>) -> Result<impl Reply> {
+    println!("ws_handler: {}", room_id);
+    let client = clients.read().await.get(&room_id).cloned();
 
     match client {
-        Some(c) => Ok(ws.on_upgrade(move |socket| ws::client_connection(socket, id, clients, c))),
+        Some(c) => Ok(ws.on_upgrade(move |socket| ws::client_connection(socket, user_id, room_id, clients, c, room_manager))),
         None => Err(warp::reject::not_found()),
     }
 }
@@ -562,6 +561,56 @@ pub async fn get_queue(headers: header::HeaderMap) -> Result<Box<dyn Reply>> {
         .map_err(|_| warp::reject::custom(HttpError))?;
 
     Ok(Box::new(json(&json_body)))
+}
+
+pub async fn start_playback(playback_state: PlaybackState, headers: header::HeaderMap) -> Result<impl Reply> {
+    println!("/start_playback");
+
+    let track_uri = playback_state.track_uri;
+    let timestamp = playback_state.timestamp;
+    let _queue = playback_state.queue; // Variable is unused
+
+    let http_client = reqwest::Client::new();
+
+    let body = serde_json::json!({
+        "uris": [track_uri],
+        "position_ms": timestamp as u64,
+    });
+
+    // Extract the Authorization header from the request headers
+    let cookies = headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let access_token = cookies
+        .split(';')
+        .find_map(|s| {
+            let cookie = Cookie::parse(s.trim()).ok()?;
+            if cookie.name() == "access_token" {
+                Some(cookie.value().to_string())
+            } else {
+                None
+            }
+        });
+
+    let access_token = match access_token {
+        Some(token) => token,
+        None => {
+            // Return a boxed version of the unauthorized reply
+            return Ok(StatusCode::UNAUTHORIZED);
+        }
+    };
+
+    let spotify_res = http_client
+        .put("https://api.spotify.com/v1/me/player/play")
+        .bearer_auth(access_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|_| warp::reject::custom(HttpError))?;
+
+    Ok(StatusCode::OK)
 }
 
 pub fn spawn_room_polling(room_id: String, rooms: Rooms, clients: Clients) {
